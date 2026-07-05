@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>ai.tegmentum.jena</groupId>
+    <artifactId>webfunction</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+
+    <developers>
+        <developer>
+            <id>zcw100</id>
+            <name>Zachary Whitley</name>
+            <email>zachary.whitley@tegmentum.ai</email>
+            <timezone>America/New_York</timezone>
+            <organization>Tegmentum</organization>
+            <organizationUrl>https://tegmentum.ai</organizationUrl>
+        </developer>
+    </developers>
+
+    <scm>
+        <url>https://github.com/tegmentum/jena-webfunction-plugin</url>
+        <tag>HEAD</tag>
+        <connection>scm:git:https://github.com/tegmentum/jena-webfunction-plugin.git</connection>
+        <developerConnection>scm:git:git@github.com:tegmentum/jena-webfunction-plugin.git</developerConnection>
+    </scm>
+
+    <licenses>
+        <license>
+            <name>APL2</name>
+            <url>https://opensource.org/licenses/Apache-2.0</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <organization>
+        <name>Tegmentum</name>
+        <url>https://tegmentum.ai</url>
+    </organization>
+
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <jena.version>6.1.0</jena.version>
+        <webassembly4j.version>2.0.0</webassembly4j.version>
+        <wasmtime4j.version>46.0.1-1.1.7</wasmtime4j.version>
+        <junit.version>4.13.2</junit.version>
+        <assertj.version>3.24.2</assertj.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.jena</groupId>
+            <artifactId>jena-arq</artifactId>
+            <version>${jena.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>ai.tegmentum.webassembly4j</groupId>
+            <artifactId>webassembly4j-api</artifactId>
+            <version>${webassembly4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.tegmentum.webassembly4j</groupId>
+            <artifactId>webassembly4j-runtime</artifactId>
+            <version>${webassembly4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.tegmentum.webassembly4j</groupId>
+            <artifactId>wasmtime4j-provider</artifactId>
+            <version>${webassembly4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.tegmentum</groupId>
+            <artifactId>wasmtime4j-jni</artifactId>
+            <version>${wasmtime4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>ai.tegmentum</groupId>
+            <artifactId>wasmtime4j-native</artifactId>
+            <version>${wasmtime4j.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>junit</groupId>
+            <artifactId>junit</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>${assertj.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>tegmentum-jena-${project.artifactId}-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
