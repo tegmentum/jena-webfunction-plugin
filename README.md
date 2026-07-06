@@ -61,6 +61,31 @@ SELECT ?result WHERE {
   - `evaluate`: ~24 µs/op (42k ops/s)
   - `instantiate`: ~513 µs/op
 
+## Testing
+
+Two paths depending on your environment:
+
+**`mvn test`** — direct-in-JVM tests: `TestWfCall`, `TestWfCallAgg`,
+`TestWfCallService`, `TestWfCallPropertyFunction`, `TestComponentBench`. Runs
+`WebFunctionInit.register()` up-front and calls into Jena's ARQ registries
+directly, no HTTP server required.
+
+**`mvn verify`** — additionally runs `FusekiWasmIT` via Testcontainers: boots
+a `stain/jena-fuseki` container, mounts the shaded plugin JAR from `target/`
+into `/fuseki/extra/` so Fuseki's `JenaSystem.init()` picks up the
+`JenaSubsystemLifecycle` SPI, drops the smoke-test wasm into `/opt/wasm/`,
+and POSTs a `wf:call` SPARQL query to the running server via
+`QueryExecutionHTTP`. Requirements: Docker running. On Apple Silicon, set
+`DOCKER_DEFAULT_PLATFORM=linux/amd64` if the image is amd64-only.
+
+The IT skips cleanly when: Docker is unavailable, the shaded JAR hasn't been
+built (`mvn package`), the wasm hasn't been built, or the shaded JAR doesn't
+include a `natives/linux-x86_64/libwasmtime4j.so` (needed for the container
+to load wasmtime — Fuseki runs Linux/amd64; dev laptops typically shade only
+their host classifier). Override the Fuseki image with `-Dfuseki.image=...`,
+the plugin JAR with `-Dwf.plugin.jar=...`, and the wasm with
+`-Dwf.toUpper.wasm=...`.
+
 ## Config (system properties)
 
 - `webfunctions.engine.provider` (default `wasmtime`)
