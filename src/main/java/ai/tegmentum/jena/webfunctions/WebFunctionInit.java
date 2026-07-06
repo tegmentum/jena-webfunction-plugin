@@ -2,6 +2,7 @@ package ai.tegmentum.jena.webfunctions;
 
 import org.apache.jena.sparql.expr.aggregate.AggregateRegistry;
 import org.apache.jena.sparql.function.FunctionRegistry;
+import org.apache.jena.sparql.service.ServiceExecutorRegistry;
 import org.apache.jena.sys.JenaSubsystemLifecycle;
 
 /**
@@ -36,5 +37,6 @@ public final class WebFunctionInit implements JenaSubsystemLifecycle {
     public static void register() {
         FunctionRegistry.get().put(WfCall.URI, WfCall.class);
         AggregateRegistry.register(WfCallAgg.URI, new WfCallAgg());
+        ServiceExecutorRegistry.get().addSingleLink(new WfCallService());
     }
 }
