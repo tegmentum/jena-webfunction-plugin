@@ -84,6 +84,18 @@
             <artifactId>wasmtime4j-native</artifactId>
             <version>${wasmtime4j.version}</version>
         </dependency>
+        <!--
+            Explicitly pull the linux-x86_64 classifier so the shaded plugin jar
+            carries natives/linux-x86_64/libwasmtime4j.so. FusekiWasmIT boots in
+            a linux/amd64 Docker container and hard-skips unless that native is
+            present in the plugin jar, regardless of the dev workstation's arch.
+        -->
+        <dependency>
+            <groupId>ai.tegmentum</groupId>
+            <artifactId>wasmtime4j-native</artifactId>
+            <version>${wasmtime4j.version}</version>
+            <classifier>linux-x86_64</classifier>
+        </dependency>
 
         <dependency>
             <groupId>junit</groupId>
