@@ -1,0 +1,38 @@
+# Custom Fuseki 6.1.0 image built at test time by FusekiWasmIT via
+# Testcontainers' ImageFromDockerfile. No public Fuseki 6.x image existed
+# when this was written (stain/jena-fuseki:latest = Fuseki 5.1.0,
+# secoresearch/fuseki:latest = 5.5.0), but the plugin is compiled against
+# Jena 6.1.0's newer FunctionRegistry API and NoSuchMethodError-s under 5.x.
+#
+# Layout:
+#   /fuseki-server.jar         — the Apache-published fat jar, Main-Class
+#                                org.apache.jena.fuseki.main.cmds.FusekiServerCmd
+#   /fuseki-extra/*.jar        — additional jars prepended to classpath;
+#                                the IT drops the shaded plugin JAR here.
+#   Fuseki writes its runtime dir (shiro.ini, gc logs, etc.) into /fuseki-run,
+#   which we chown so a non-root default user can still use it.
+#
+# The array-form CMD skips the shell so Java's own `dir/*` classpath expansion
+# is honored — a shell would try to glob `/fuseki-extra/*` at CMD time when the
+# dir is still empty. Extra jars are prepended so our SPI wins deterministically.
+
+# linux/amd64 is required because wasmtime4j-native only ships an amd64 linux
+# binary; on aarch64 hosts this triggers cross-emulation via qemu/rosetta.
+FROM --platform=linux/amd64 eclipse-temurin:21-jre
+
+ARG JENA_VERSION=6.1.0
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    mkdir -p /fuseki-extra /fuseki-run && \
+    curl -fSL -o /fuseki-server.jar \
+        "https://repo1.maven.org/maven2/org/apache/jena/jena-fuseki-server/${JENA_VERSION}/jena-fuseki-server-${JENA_VERSION}.jar" && \
+    apt-get purge -y curl && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /fuseki-run
+EXPOSE 3030
+
+CMD ["java", "-cp", "/fuseki-extra/*:/fuseki-server.jar", \
+     "org.apache.jena.fuseki.main.cmds.FusekiServerCmd", \
+     "--mem", "/ds"]

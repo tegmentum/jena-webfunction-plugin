@@ -70,21 +70,24 @@ Two paths depending on your environment:
 `WebFunctionInit.register()` up-front and calls into Jena's ARQ registries
 directly, no HTTP server required.
 
-**`mvn verify`** — additionally runs `FusekiWasmIT` via Testcontainers: boots
-a `stain/jena-fuseki` container, mounts the shaded plugin JAR from `target/`
-into `/fuseki/extra/` so Fuseki's `JenaSystem.init()` picks up the
-`JenaSubsystemLifecycle` SPI, drops the smoke-test wasm into `/opt/wasm/`,
-and POSTs a `wf:call` SPARQL query to the running server via
-`QueryExecutionHTTP`. Requirements: Docker running. On Apple Silicon, set
-`DOCKER_DEFAULT_PLATFORM=linux/amd64` if the image is amd64-only.
+**`mvn verify`** — additionally runs `FusekiWasmIT` via Testcontainers.
+Builds a custom Fuseki 6.1.0 image at test time from
+`src/test/docker/Dockerfile.fuseki` (no public Fuseki 6.x image existed when
+this was written — `stain/jena-fuseki:latest` was Fuseki 5.1.0 and the
+plugin's `WebFunctionInit` uses the 6.x `FunctionRegistry` API), boots the
+container, mounts the shaded plugin JAR into `/fuseki-extra/` (prepended to
+classpath), drops the smoke-test wasm into `/opt/wasm/`, and POSTs a
+`wf:call` SPARQL query via `QueryExecutionHTTP`. Requirements: Docker
+running. On Apple Silicon, set `DOCKER_DEFAULT_PLATFORM=linux/amd64` and
+have Colima/Docker Desktop cross-emulation set up — the Dockerfile pins
+`FROM --platform=linux/amd64` because `wasmtime4j-native` only ships an
+amd64 Linux binary.
 
 The IT skips cleanly when: Docker is unavailable, the shaded JAR hasn't been
 built (`mvn package`), the wasm hasn't been built, or the shaded JAR doesn't
-include a `natives/linux-x86_64/libwasmtime4j.so` (needed for the container
-to load wasmtime — Fuseki runs Linux/amd64; dev laptops typically shade only
-their host classifier). Override the Fuseki image with `-Dfuseki.image=...`,
-the plugin JAR with `-Dwf.plugin.jar=...`, and the wasm with
-`-Dwf.toUpper.wasm=...`.
+include a `natives/linux-x86_64/libwasmtime4j.so`. Override the Jena version
+with `-Djena.image.version=…`, the plugin JAR with `-Dwf.plugin.jar=…`, and
+the wasm with `-Dwf.toUpper.wasm=…`.
 
 ## Config (system properties)
 

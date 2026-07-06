@@ -2,64 +2,65 @@ package ai.tegmentum.jena;
 
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.utility.MountableFile;
 
 import java.io.File;
+import java.nio.file.Paths;
 import java.time.Duration;
 
 /**
- * Testcontainers wrapper for Apache Jena Fuseki. Boots {@code stain/jena-fuseki},
- * mounts the shaded plugin JAR into Fuseki's {@code extra} directory so
- * {@code JenaSubsystemLifecycle} SPI discovers our webfunction registrations at
- * server startup, and creates an in-memory dataset for query execution.
+ * Testcontainers wrapper for Apache Jena Fuseki. Builds a Fuseki 6.1.0 image
+ * from {@code src/test/docker/Dockerfile.fuseki} at test time (no matching
+ * public image existed at the time of writing), mounts the shaded plugin JAR
+ * into {@code /fuseki-extra/} so Jena's {@code JenaSubsystemLifecycle} SPI
+ * discovers our webfunction registrations when {@code JenaSystem.init()} runs,
+ * and boots an in-memory dataset at {@code /ds}.
  *
  * <p>Meant for {@code *IT.java} tests run under maven-failsafe-plugin in the
  * {@code integration-test} phase, so the shaded JAR exists at test time.
  */
 public final class FusekiContainer extends GenericContainer<FusekiContainer> {
 
-    public static final String DEFAULT_IMAGE = "stain/jena-fuseki:latest";
     public static final int FUSEKI_PORT = 3030;
 
-    private static final String CONTAINER_EXTRA_DIR = "/fuseki/extra";
+    /** Absolute path inside the container where extra classpath jars are placed. */
+    private static final String CONTAINER_EXTRA_DIR = "/fuseki-extra";
 
-    private String datasetName = "ds";
+    /**
+     * Path to the Dockerfile. Kept in the repo so the image build is
+     * reproducible and version-controlled alongside the IT that consumes it.
+     */
+    private static final String DOCKERFILE = "src/test/docker/Dockerfile.fuseki";
+
+    /**
+     * Jena version to bake into the image — matches the {@code jena.version}
+     * property in {@code pom.xml}. Override via {@code -Djena.image.version=...}.
+     */
+    private static final String JENA_VERSION =
+            System.getProperty("jena.image.version", "6.1.0");
+
+    private final String datasetName = "ds";
 
     public FusekiContainer() {
-        this(System.getProperty("fuseki.image", DEFAULT_IMAGE));
-    }
-
-    public FusekiContainer(final String image) {
-        super(image);
+        super(new ImageFromDockerfile()
+                .withDockerfile(Paths.get(DOCKERFILE))
+                .withBuildArg("JENA_VERSION", JENA_VERSION));
         addExposedPort(FUSEKI_PORT);
-        // Container is ready when the entrypoint logs "Fuseki is available",
-        // which fires after Fuseki has started AND all FUSEKI_DATASET_* env
-        // vars have been POSTed to /$/datasets. Waiting on /$/ping alone
-        // races dataset creation. Log-based waits also sidestep intermittent
-        // HTTP flakiness through Colima's port forward.
-        waitingFor(Wait.forLogMessage(".*Fuseki is available.*", 1)
+        // Match the Fuseki-main startup log message — logged once the HTTP
+        // listener is bound and datasets are wired. Log-based waits also
+        // sidestep occasional HTTP flakiness through Colima's amd64-emulated
+        // port forward.
+        waitingFor(Wait.forLogMessage(".*Start Fuseki.*", 1)
                 .withStartupTimeout(Duration.ofMinutes(2)));
     }
 
     /**
-     * Create a TDB dataset at the given path on Fuseki startup. Default is
-     * {@code ds}. The {@code stain/jena-fuseki} entrypoint reads
-     * {@code FUSEKI_DATASET_*} env vars and POSTs to {@code /$/datasets} to
-     * create them after the server boots — the log wait strategy above blocks
-     * container-ready until that HTTP call completes.
-     */
-    public FusekiContainer withDataset(final String name) {
-        this.datasetName = name;
-        withEnv("FUSEKI_DATASET_1", name);
-        return this;
-    }
-
-    /**
-     * Mount a plugin JAR into Fuseki's extra directory. Pass the path to the
-     * shaded plugin JAR built by {@code mvn package}. The Fuseki launcher adds
-     * jars under {@code /fuseki/extra} to the classpath at startup, so the
-     * plugin's {@code JenaSubsystemLifecycle} SPI is discovered when the server
-     * runs {@code JenaSystem.init()}.
+     * Mount a plugin JAR into the container's extra-classpath directory. Pass
+     * the path to the shaded plugin JAR built by {@code mvn package}. Fuseki's
+     * launcher {@code CMD} prepends {@code /fuseki-extra/*} to the classpath,
+     * so the plugin's {@code JenaSubsystemLifecycle} SPI is picked up when the
+     * server runs {@code JenaSystem.init()}.
      */
     public FusekiContainer withPluginJar(final String hostJarPath) {
         final File jar = new File(hostJarPath);

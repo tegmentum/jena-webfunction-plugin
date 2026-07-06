@@ -30,7 +30,6 @@ import static org.junit.Assume.assumeTrue;
  */
 public class FusekiWasmIT {
 
-    private static final String DATASET = "ds";
     private static final String PLUGIN_JAR = System.getProperty("wf.plugin.jar",
             "target/tegmentum-jena-webfunction-0.1.0-SNAPSHOT.jar");
     private static final String WASM_PATH = System.getProperty("wf.toUpper.wasm",
@@ -57,7 +56,6 @@ public class FusekiWasmIT {
                 jarContains(PLUGIN_JAR, "natives/linux-x86_64/libwasmtime4j.so"));
 
         CONTAINER = new FusekiContainer()
-                .withDataset(DATASET)
                 .withPluginJar(PLUGIN_JAR);
         WASM_URL = CONTAINER.withWasm(WASM_PATH, "/opt/wasm/to_upper_component.wasm");
         CONTAINER.start();
