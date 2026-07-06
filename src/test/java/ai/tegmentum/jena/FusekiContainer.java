@@ -32,22 +32,25 @@ public final class FusekiContainer extends GenericContainer<FusekiContainer> {
     public FusekiContainer(final String image) {
         super(image);
         addExposedPort(FUSEKI_PORT);
-        // Ready when the admin ping returns 200. /$/ping is Fuseki's canonical
-        // liveness endpoint.
-        waitingFor(Wait.forHttp("/$/ping")
-                .forPort(FUSEKI_PORT)
-                .forStatusCode(200)
+        // Container is ready when the entrypoint logs "Fuseki is available",
+        // which fires after Fuseki has started AND all FUSEKI_DATASET_* env
+        // vars have been POSTed to /$/datasets. Waiting on /$/ping alone
+        // races dataset creation. Log-based waits also sidestep intermittent
+        // HTTP flakiness through Colima's port forward.
+        waitingFor(Wait.forLogMessage(".*Fuseki is available.*", 1)
                 .withStartupTimeout(Duration.ofMinutes(2)));
     }
 
     /**
-     * Create an in-memory dataset at the given path on Fuseki startup.
-     * Default is {@code ds}.
+     * Create a TDB dataset at the given path on Fuseki startup. Default is
+     * {@code ds}. The {@code stain/jena-fuseki} entrypoint reads
+     * {@code FUSEKI_DATASET_*} env vars and POSTs to {@code /$/datasets} to
+     * create them after the server boots — the log wait strategy above blocks
+     * container-ready until that HTTP call completes.
      */
     public FusekiContainer withDataset(final String name) {
         this.datasetName = name;
-        // stain/jena-fuseki entrypoint forwards command args to fuseki-server.
-        withCommand("--mem", "/" + name);
+        withEnv("FUSEKI_DATASET_1", name);
         return this;
     }
 
