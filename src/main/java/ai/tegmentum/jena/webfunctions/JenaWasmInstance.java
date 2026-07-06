@@ -14,40 +14,78 @@ import org.apache.jena.graph.Node;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URL;
 import java.net.URLConnection;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Component-model WASM instance for the Jena binding. Loads a {@code .wasm}
- * component from a URL and dispatches WIT-typed calls into it.
+ * Component-model WASM instance for the Jena binding. A single process-wide
+ * {@link Engine} is lazily built the first time any URL is loaded (using
+ * {@link WebFunctionConfig#buildEngine()} — note that {@code webfunctions.*}
+ * system properties are frozen at that point); each URL's compiled
+ * {@link Component} is cached in a static map keyed by URL, so repeated
+ * {@code wf:call} invocations skip download + compilation and only pay
+ * instantiation cost.
  *
- * <p>Every top-level constructor builds its own {@link Engine} and {@link
- * Component}. Callers should hold onto the instance while it is in use and
- * {@link #close()} it when done.
+ * <p>Each {@code JenaWasmInstance} owns a fresh {@link ComponentInstance}
+ * created from the cached component; callers should {@link #close()} them
+ * when done. The cached {@code Engine}/{@code Component} entries live for
+ * the JVM's lifetime.
  */
 public final class JenaWasmInstance implements Closeable {
 
-    private Engine engine;
-    private Component component;
+    private static volatile Engine SHARED_ENGINE;
+    private static final Object ENGINE_LOCK = new Object();
+    private static final ConcurrentHashMap<URL, Component> COMPONENT_CACHE =
+            new ConcurrentHashMap<>();
+
     private ComponentInstance instance;
     private boolean closed;
 
     public JenaWasmInstance(final URL wasmUrl) throws IOException {
-        this.engine = WebFunctionConfig.buildEngine();
-        if (!engine.capabilities().supportsComponents()) {
-            engine.close();
-            throw new IllegalStateException("engine '"
-                    + engine.info().engineId() + "' does not support components");
-        }
-        this.component = engine.loadComponent(readAll(wasmUrl));
+        final Component component = componentFor(wasmUrl);
         this.instance = component.instantiate(DefaultLinkingContext.builder().build());
+    }
+
+    private static Engine sharedEngine() {
+        Engine e = SHARED_ENGINE;
+        if (e != null) return e;
+        synchronized (ENGINE_LOCK) {
+            if (SHARED_ENGINE == null) {
+                final Engine built = WebFunctionConfig.buildEngine();
+                if (!built.capabilities().supportsComponents()) {
+                    built.close();
+                    throw new IllegalStateException("engine '"
+                            + built.info().engineId() + "' does not support components");
+                }
+                SHARED_ENGINE = built;
+            }
+            return SHARED_ENGINE;
+        }
+    }
+
+    private static Component componentFor(final URL wasmUrl) throws IOException {
+        Component cached = COMPONENT_CACHE.get(wasmUrl);
+        if (cached != null) return cached;
+        // computeIfAbsent inside a try — surface IOExceptions cleanly.
+        final Engine engine = sharedEngine();
+        try {
+            return COMPONENT_CACHE.computeIfAbsent(wasmUrl, u -> {
+                try {
+                    return engine.loadComponent(readAll(u));
+                } catch (IOException ioe) {
+                    throw new UncheckedIOException(ioe);
+                }
+            });
+        } catch (UncheckedIOException e) {
+            throw e.getCause();
+        }
     }
 
     /**
      * Invoke the component's {@code evaluate} export with the given arguments.
-     * Returns the ok-payload {@code binding-sets} unmarshalled into rows. On
-     * err, throws {@link IOException} carrying the err string.
      */
     public List<WitValueMarshaller.Row> evaluate(final Node... args) throws IOException {
         final WitValue result = (WitValue) instance.invokeWit(
@@ -76,8 +114,7 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     /**
-     * Invoke the component's {@code doc} export. WIT declares it as
-     * {@code doc: func() -> binding-sets} (no result wrapping).
+     * Invoke the component's {@code doc} export.
      */
     public List<WitValueMarshaller.Row> doc() {
         final WitValue result = (WitValue) instance.invokeWit("doc");
@@ -116,11 +153,25 @@ public final class JenaWasmInstance implements Closeable {
 
     @Override
     public void close() {
-        if (component != null) component.close();
-        if (engine != null) engine.close();
+        // Instance is per-call — release only that. Engine + Component stay
+        // cached for reuse across subsequent calls.
         instance = null;
-        component = null;
-        engine = null;
         closed = true;
+    }
+
+    // ---- Test hooks --------------------------------------------------------
+
+    /**
+     * Purge all cached components + close the shared engine. Test-only.
+     */
+    static void resetCache() {
+        COMPONENT_CACHE.forEach((k, c) -> c.close());
+        COMPONENT_CACHE.clear();
+        synchronized (ENGINE_LOCK) {
+            if (SHARED_ENGINE != null) {
+                SHARED_ENGINE.close();
+                SHARED_ENGINE = null;
+            }
+        }
     }
 }
