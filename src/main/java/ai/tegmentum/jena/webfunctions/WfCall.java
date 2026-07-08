@@ -50,6 +50,11 @@ public final class WfCall implements Function {
             callArgs[i - 1] = args.get(i).eval(binding, env).asNode();
         }
 
+        // Bind the v0.3.0 callback context for the duration of this evaluate.
+        // A nested wf:call reuses the outer context (bind() is a no-op when
+        // one already exists); unbindIfOutermost only clears the ThreadLocal
+        // when the outermost caller returns.
+        final CallbackContext ctx = CallbackContext.bind(env);
         try (JenaWasmInstance instance = new JenaWasmInstance(componentUrl)) {
             final List<WitValueMarshaller.Row> rows = instance.evaluate(callArgs);
             if (rows.isEmpty()) {
@@ -62,6 +67,8 @@ public final class WfCall implements Function {
             return NodeValue.makeNode(row.values.get(0));
         } catch (IOException e) {
             throw new ExprEvalException("wf:call: " + e.getMessage(), e);
+        } finally {
+            CallbackContext.unbindIfOutermost(ctx);
         }
     }
 

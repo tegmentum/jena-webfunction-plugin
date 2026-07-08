@@ -46,7 +46,62 @@ public final class JenaWasmInstance implements Closeable {
 
     public JenaWasmInstance(final URL wasmUrl) throws IOException {
         final Component component = componentFor(wasmUrl);
-        this.instance = component.instantiate(DefaultLinkingContext.builder().build());
+        final DefaultLinkingContext.Builder linker = DefaultLinkingContext.builder();
+        if (WebFunctionConfig.callbackEnabled()) {
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.0#execute-query",
+                HostCallbacks.executeQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.0#callback-depth",
+                HostCallbacks.callbackDepth());
+            // v0.3.1 additive host imports — register alongside v0.3.0
+            // so both worlds' components link cleanly.
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.1#execute-query",
+                HostCallbacks.executeQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.1#callback-depth",
+                HostCallbacks.callbackDepth());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.1#execute-update",
+                HostCallbacks.executeUpdate());
+            // v0.3.2 additive imports — prepared queries.
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.2#execute-query",
+                HostCallbacks.executeQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.2#callback-depth",
+                HostCallbacks.callbackDepth());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.2#execute-update",
+                HostCallbacks.executeUpdate());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.2#prepare-query",
+                HostCallbacks.prepareQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.2#run-prepared",
+                HostCallbacks.runPrepared());
+            // v0.3.3 additive imports.
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.3#execute-query",
+                HostCallbacks.executeQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.3#callback-depth",
+                HostCallbacks.callbackDepth());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.3#execute-update",
+                HostCallbacks.executeUpdate());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.3#prepare-query",
+                HostCallbacks.prepareQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.3#run-prepared",
+                HostCallbacks.runPrepared());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.3.3#follow-predicate",
+                HostCallbacks.followPredicate());
+        }
+        this.instance = component.instantiate(linker.build());
     }
 
     private static Engine sharedEngine() {
