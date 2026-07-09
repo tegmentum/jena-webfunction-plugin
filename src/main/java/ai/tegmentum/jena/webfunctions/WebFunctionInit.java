@@ -39,6 +39,12 @@ public final class WebFunctionInit implements JenaSubsystemLifecycle {
         FunctionRegistry.get().put(WfCall.URI, WfCall.class);
         PropertyFunctionRegistry.get().put(WfCallPropertyFunction.URI, WfCallPropertyFunction.class);
         AggregateRegistry.register(WfCallAgg.URI, new WfCallAgg());
+        // Order matters: the WfCallServiceExecutor matches SERVICE URI
+        // "wf:call" first so its BGP-envelope form takes precedence over
+        // the older SERVICE-URI-is-the-wasm-URL form handled by
+        // WfCallService. Both remain live so callers pick the shape that
+        // suits them.
+        ServiceExecutorRegistry.get().addSingleLink(new WfCallServiceExecutor());
         ServiceExecutorRegistry.get().addSingleLink(new WfCallService());
     }
 }

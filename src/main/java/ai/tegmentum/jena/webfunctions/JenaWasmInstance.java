@@ -1,5 +1,9 @@
 package ai.tegmentum.jena.webfunctions;
 
+import ai.tegmentum.wasmtime4j.component.ComponentResult;
+import ai.tegmentum.wasmtime4j.component.ComponentVal;
+import ai.tegmentum.wasmtime4j.component.ComponentVariant;
+import ai.tegmentum.wasmtime4j.component.ConcurrentCall;
 import ai.tegmentum.webassembly4j.api.Component;
 import ai.tegmentum.webassembly4j.api.ComponentInstance;
 import ai.tegmentum.webassembly4j.api.DefaultLinkingContext;
@@ -9,7 +13,10 @@ import ai.tegmentum.wasmtime4j.wit.WitString;
 import ai.tegmentum.wasmtime4j.wit.WitU64;
 import ai.tegmentum.wasmtime4j.wit.WitValue;
 
+import org.apache.jena.datatypes.RDFDatatype;
+import org.apache.jena.datatypes.TypeMapper;
 import org.apache.jena.graph.Node;
+import org.apache.jena.graph.NodeFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
@@ -17,6 +24,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URL;
 import java.net.URLConnection;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -169,6 +177,56 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     /**
+     * ComponentVal-based {@code evaluate} path via wasmtime4j's
+     * {@code runConcurrent} + JSON codec. Structurally tolerant of the
+     * mixed-variant binding rows that the {@link WitValue} deserializer
+     * (used by {@link #evaluate}) currently rejects.
+     *
+     * <p><b>Limitation:</b> wasmtime4j's {@code runConcurrent} constructs
+     * a fresh async linker on the Rust side that only wires WASI — the
+     * host imports we register in the constructor are NOT visible to
+     * the concurrent invocation. Callable only for wasms that don't use
+     * the {@code stardog:webfunction/host} imports. Callable safely by
+     * pure-computation guests once wasmtime4j exposes a hook to feed
+     * host imports into the concurrent linker, so this method stays
+     * here as a v0.1 escape hatch.
+     */
+    public List<WitValueMarshaller.Row> evaluateComponentVal(final Node... args) throws IOException {
+        final List<ComponentVal> argList = new ArrayList<>(args.length);
+        for (Node n : args) argList.add(nodeToComponentVal(n));
+
+        final ConcurrentCall call = ConcurrentCall.of(
+                "evaluate", ComponentVal.list(argList));
+        // The webassembly4j-api ComponentInstance's runConcurrent is a
+        // different abstraction (ConcurrentTask<T>) — unwrap to the
+        // wasmtime4j-native instance to reach the JSON-based
+        // runConcurrent(List<ConcurrentCall>) codec we actually want.
+        final ai.tegmentum.wasmtime4j.component.ComponentInstance native_ =
+                instance.unwrap(ai.tegmentum.wasmtime4j.component.ComponentInstance.class)
+                        .orElseThrow(() -> new IOException(
+                                "runConcurrent unavailable: instance is not the wasmtime4j "
+                              + "provider (webassembly4j.engine.provider must be 'wasmtime')"));
+        final List<List<ComponentVal>> results;
+        try {
+            results = native_.runConcurrent(java.util.Collections.singletonList(call));
+        } catch (ai.tegmentum.wasmtime4j.exception.WasmException e) {
+            throw new IOException("evaluate (runConcurrent) failed: " + e.getMessage(), e);
+        }
+        if (results.isEmpty() || results.get(0).isEmpty()) {
+            throw new IOException("evaluate returned no values");
+        }
+        final ComponentVal outer = results.get(0).get(0);
+        final ComponentResult res = outer.asResult();
+        if (res.isErr()) {
+            throw new IOException(res.getErr().map(ComponentVal::asString)
+                    .orElse("component returned err with no payload"));
+        }
+        final ComponentVal ok = res.getOk().orElseThrow(() ->
+                new IOException("evaluate: ok payload missing"));
+        return bindingSetsFromComponentVal(ok);
+    }
+
+    /**
      * Invoke the component's {@code doc} export.
      */
     public List<WitValueMarshaller.Row> doc() {
@@ -212,6 +270,96 @@ public final class JenaWasmInstance implements Closeable {
         // cached for reuse across subsequent calls.
         instance = null;
         closed = true;
+    }
+
+    // ---- ComponentVal marshalling -----------------------------------------
+    //
+    // Same shape as HostCallbacks.encodeNode / decodeNode but kept private
+    // to this class so the SERVICE handler stays a single dependency.
+
+    private static final String XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
+
+    private static ComponentVal nodeToComponentVal(final Node n) {
+        if (n.isURI()) {
+            return ComponentVal.variant("iri", ComponentVal.string(n.getURI()));
+        }
+        if (n.isBlank()) {
+            return ComponentVal.variant("bnode", ComponentVal.string(n.getBlankNodeLabel()));
+        }
+        if (n.isLiteral()) {
+            String datatype = n.getLiteralDatatypeURI();
+            if (datatype == null || datatype.isEmpty()) datatype = XSD_STRING;
+            final java.util.Map<String, ComponentVal> fields = new java.util.LinkedHashMap<>();
+            fields.put("label", ComponentVal.string(n.getLiteralLexicalForm()));
+            fields.put("datatype", ComponentVal.string(datatype));
+            final String lang = n.getLiteralLanguage();
+            fields.put("lang", (lang != null && !lang.isEmpty())
+                    ? ComponentVal.some(ComponentVal.string(lang))
+                    : ComponentVal.none());
+            return ComponentVal.variant("literal", ComponentVal.record(fields));
+        }
+        throw new IllegalArgumentException("wf: unsupported Node kind: " + n);
+    }
+
+    private static Node componentValToNode(final ComponentVal v) {
+        final ComponentVariant cv = v.asVariant();
+        final String caseName = cv.getCaseName();
+        final ComponentVal payload = cv.getPayload().orElse(null);
+        switch (caseName) {
+            case "iri":
+                return NodeFactory.createURI(payload == null ? "" : payload.asString());
+            case "bnode":
+                return NodeFactory.createBlankNode(payload == null ? "" : payload.asString());
+            case "literal": {
+                if (payload == null) {
+                    throw new IllegalStateException("wf: literal variant has no payload");
+                }
+                final java.util.Map<String, ComponentVal> fields = payload.asRecord();
+                final String label = fields.get("label").asString();
+                final String datatype = fields.get("datatype").asString();
+                final java.util.Optional<ComponentVal> lang = fields.get("lang").asSome();
+                if (lang.isPresent()) {
+                    return NodeFactory.createLiteralLang(label, lang.get().asString());
+                }
+                final RDFDatatype dt = TypeMapper.getInstance().getSafeTypeByName(datatype);
+                return NodeFactory.createLiteralDT(label, dt);
+            }
+            default:
+                throw new IllegalStateException("wf: unknown value variant case: " + caseName);
+        }
+    }
+
+    private static List<WitValueMarshaller.Row> bindingSetsFromComponentVal(final ComponentVal bs) {
+        final java.util.Map<String, ComponentVal> fields = bs.asRecord();
+        final List<String> vars = new ArrayList<>();
+        for (ComponentVal e : fields.get("vars").asList()) vars.add(e.asString());
+        final List<WitValueMarshaller.Row> out = new ArrayList<>();
+        for (ComponentVal rowVal : fields.get("rows").asList()) {
+            // Unbound columns stay null so BindingBuilder in the SERVICE
+            // handler leaves them unbound (root row's `parent` is the
+            // motivating case).
+            final List<Node> byIndex = new ArrayList<>(java.util.Collections.nCopies(vars.size(), null));
+            for (ComponentVal bindingVal : rowVal.asList()) {
+                final java.util.Map<String, ComponentVal> b = bindingVal.asRecord();
+                final String name = b.get("name").asString();
+                final int idx = vars.indexOf(name);
+                if (idx < 0) continue;
+                byIndex.set(idx, componentValToNode(b.get("value")));
+            }
+            // WitValueMarshaller.Row is package-private-constructed; call
+            // the marshaller's public helper via reflection would be
+            // fragile — instead use a lightweight local subclass proxy
+            // through a factory method.
+            out.add(newRow(vars, byIndex));
+        }
+        return out;
+    }
+
+    private static WitValueMarshaller.Row newRow(final List<String> vars, final List<Node> values) {
+        // WitValueMarshaller.Row's constructor is package-private and both
+        // classes share the same package, so direct construction here
+        // succeeds without reflection.
+        return new WitValueMarshaller.Row(vars, values);
     }
 
     // ---- Test hooks --------------------------------------------------------
