@@ -1,5 +1,6 @@
 package ai.tegmentum.jena.webfunctions;
 
+import ai.tegmentum.jena.webfunctions.rewrite.WebFunctionQueryEngine;
 import org.apache.jena.sparql.expr.aggregate.AggregateRegistry;
 import org.apache.jena.sparql.function.FunctionRegistry;
 import org.apache.jena.sparql.pfunction.PropertyFunctionRegistry;
@@ -46,5 +47,9 @@ public final class WebFunctionInit implements JenaSubsystemLifecycle {
         // suits them.
         ServiceExecutorRegistry.get().addSingleLink(new WfCallServiceExecutor());
         ServiceExecutorRegistry.get().addSingleLink(new WfCallService());
+        // Install the query-rewrite pipeline factory. The engine is a
+        // no-op until callers register a RewritePipeline.Context; see
+        // WebFunctionQueryEngine.installGlobal for the wiring shape.
+        WebFunctionQueryEngine.register();
     }
 }
