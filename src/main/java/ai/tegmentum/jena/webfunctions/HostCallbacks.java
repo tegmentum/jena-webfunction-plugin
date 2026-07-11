@@ -69,6 +69,96 @@ public final class HostCallbacks {
         };
     }
 
+    /**
+     * v0.4 {@code invoke-wasm: func(url: string, args: list<value>)
+     * -> result<binding-sets, string>}.
+     *
+     * <p>Recursively invokes another wasm component identified by
+     * {@code url}. The nested guest runs in a fresh
+     * {@link JenaWasmInstance} — component instantiation is cached per
+     * URL by wasmtime4j, so back-to-back invocations of the same URL
+     * reuse the compiled component.
+     *
+     * <p>Depth accounting: the recursion counter is bumped around the
+     * nested call so the host's callback-max-depth cap covers
+     * invoke-wasm chains and a subsequent execute-query at the outer
+     * level sees the correct depth on return.
+     */
+    public static WitHostFunction invokeWasm() {
+        return args -> {
+            if (!WebFunctionConfig.callbackEnabled()) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback disabled by webfunctions.callback.enabled=false")) };
+            }
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback: invoke-wasm has no context bound — nested guest "
+                    + "was reached from a code path that didn't bind CallbackContext")) };
+            }
+            try {
+                final String url = ((ComponentVal) args[0]).asString();
+                final ComponentVal argsList = (ComponentVal) args[1];
+                final List<ComponentVal> inner = argsList.asList();
+                final Node[] callArgs = new Node[inner.size()];
+                for (int i = 0; i < inner.size(); i++) {
+                    callArgs[i] = decodeNode(inner.get(i));
+                }
+
+                ctx.enter();
+                try {
+                    final JenaWasmInstance instance =
+                            new JenaWasmInstance(new java.net.URL(url));
+                    try {
+                        final List<WitValueMarshaller.Row> rows = instance.evaluate(callArgs);
+                        return new Object[] { ComponentVal.ok(encodeRows(rows, ctx.maxRows())) };
+                    } finally {
+                        instance.close();
+                    }
+                } finally {
+                    ctx.exit();
+                }
+            } catch (Exception e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "invoke-wasm: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
+            }
+        };
+    }
+
+    /**
+     * Encode a {@link JenaWasmInstance#evaluate} result set (List of Rows
+     * that already carry the shared {@code vars} list) into a WIT
+     * {@code binding-sets} record. Companion to the {@link ResultSet}
+     * overload above, for the invoke-wasm return path.
+     */
+    private static ComponentVal encodeRows(final List<WitValueMarshaller.Row> rows,
+                                           final int rowCap) {
+        final List<String> vars = rows.isEmpty() ? List.of() : rows.get(0).vars;
+        final List<ComponentVal> varsVals = new ArrayList<>();
+        for (String v : vars) varsVals.add(ComponentVal.string(v));
+
+        final List<ComponentVal> rowVals = new ArrayList<>();
+        int emitted = 0;
+        for (WitValueMarshaller.Row row : rows) {
+            if (emitted >= rowCap) break;
+            final List<ComponentVal> bindings = new ArrayList<>();
+            for (int i = 0; i < row.vars.size(); i++) {
+                final Node n = row.values.get(i);
+                if (n == null) continue;
+                final Map<String, ComponentVal> bindingFields = new LinkedHashMap<>();
+                bindingFields.put("name", ComponentVal.string(row.vars.get(i)));
+                bindingFields.put("value", encodeNode(n));
+                bindings.add(ComponentVal.record(bindingFields));
+            }
+            rowVals.add(ComponentVal.list(bindings));
+            emitted++;
+        }
+        final Map<String, ComponentVal> bs = new LinkedHashMap<>();
+        bs.put("vars", ComponentVal.list(varsVals));
+        bs.put("rows", ComponentVal.list(rowVals));
+        return ComponentVal.record(bs);
+    }
+
     /** {@code callback-depth: func() -> u32}. */
     public static WitHostFunction callbackDepth() {
         return args -> {
