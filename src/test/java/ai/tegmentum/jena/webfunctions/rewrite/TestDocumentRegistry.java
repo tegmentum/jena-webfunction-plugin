@@ -486,4 +486,93 @@ public class TestDocumentRegistry {
         // programmatic entry construction.
         assertThat(DocumentRegistry.DEFAULT_SWEEP_INTERVAL_SECS).isEqualTo(300);
     }
+
+    // -----------------------------------------------------------------
+    // v1.0 window / tail retention policies (memo `wf-document-v1.md` §03)
+    // -----------------------------------------------------------------
+
+    private static String managedWithRetention(final String retentionJson) {
+        return """
+                {
+                  "documents": [{
+                    "name": "manuals",
+                    "mode": "managed",
+                    "guest_url": "file:///x.wasm",
+                    "search_backend": "http://s/",
+                    "storage_backend": "http://t/",
+                    "search_index": "manuals",
+                    "sirix_database": "d",
+                    "sirix_resource": "manuals",
+                    "sweep_interval_secs": 300,
+                    "revision_retention": %s
+                  }]
+                }
+                """.formatted(retentionJson);
+    }
+
+    @Test
+    public void acceptsWindowDays() {
+        final DocumentRegistry reg = parse(managedWithRetention("{\"window\": \"30d\"}"));
+        assertThat(reg.byName("manuals").revisionRetention()).isEqualTo("window:30d");
+    }
+
+    @Test
+    public void acceptsWindowHours() {
+        final DocumentRegistry reg = parse(managedWithRetention("{\"window\": \"24h\"}"));
+        assertThat(reg.byName("manuals").revisionRetention()).isEqualTo("window:24h");
+    }
+
+    @Test
+    public void acceptsWindowMinutes() {
+        final DocumentRegistry reg = parse(managedWithRetention("{\"window\": \"5m\"}"));
+        assertThat(reg.byName("manuals").revisionRetention()).isEqualTo("window:5m");
+    }
+
+    @Test
+    public void acceptsTailPositive() {
+        final DocumentRegistry reg = parse(managedWithRetention("{\"tail\": 10}"));
+        assertThat(reg.byName("manuals").revisionRetention()).isEqualTo("tail:10");
+    }
+
+    @Test
+    public void rejectsWindowBadUnit() {
+        assertThatThrownBy(() -> parse(managedWithRetention("{\"window\": \"30x\"}")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown unit")
+                .hasMessageContaining("30x")
+                .hasMessageContaining("manuals");
+    }
+
+    @Test
+    public void rejectsWindowEmpty() {
+        assertThatThrownBy(() -> parse(managedWithRetention("{\"window\": \"\"}")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must not be empty")
+                .hasMessageContaining("manuals");
+    }
+
+    @Test
+    public void rejectsTailZero() {
+        assertThatThrownBy(() -> parse(managedWithRetention("{\"tail\": 0}")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("positive integer")
+                .hasMessageContaining("manuals");
+    }
+
+    @Test
+    public void rejectsTailNegative() {
+        assertThatThrownBy(() -> parse(managedWithRetention("{\"tail\": -1}")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("positive integer")
+                .hasMessageContaining("manuals");
+    }
+
+    @Test
+    public void rejectsUnknownDiscriminant() {
+        assertThatThrownBy(() -> parse(managedWithRetention("{\"unknown\": \"value\"}")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("unknown revision_retention discriminant")
+                .hasMessageContaining("unknown")
+                .hasMessageContaining("manuals");
+    }
 }

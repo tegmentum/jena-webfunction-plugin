@@ -230,16 +230,13 @@ public final class DocumentRegistry {
                             "document registry entry `" + name + "`: managed entries must "
                                     + "declare `revision_retention`");
                 }
-                final String retention = raw.get("revision_retention").getAsString().value();
-                // v1.0 lifts the v0.2 gate on `all` — time-travel search
-                // requires the sweep to mirror historical revisions into
-                // the search backend, and the guest/sweep now support it.
-                if (!"latest".equals(retention) && !"all".equals(retention)) {
-                    throw new IllegalArgumentException(
-                            "document registry entry `" + name + "`: unknown revision_retention `"
-                                    + retention + "` (expected `latest` or `all`)");
-                }
-                revisionRetention = retention;
+                // v1.0 accepts either the string forms (`latest` / `all`,
+                // v0.2 backwards-compat) or the object forms
+                // `{"window": "<duration>"}` / `{"tail": <positive int>}`.
+                // `parseRevisionRetention` canonicalizes both shapes into
+                // a single wire string the sweep dispatches on
+                // (memo `wf-document-v1.md` §03).
+                revisionRetention = parseRevisionRetention(name, raw.get("revision_retention"));
             }
             case FEDERATED -> {
                 sweepInterval = OptionalInt.empty();
@@ -259,6 +256,122 @@ public final class DocumentRegistry {
                     "document registry entry `" + name + "`: missing required field `" + key + "`");
         }
         return raw.get(key).getAsString().value();
+    }
+
+    /**
+     * Parse a {@code revision_retention} JSON value (string or object)
+     * into the canonical wire string the sweep dispatches on.
+     *
+     * <ul>
+     *   <li>{@code "latest"} / {@code "all"} — v0.2 backwards-compat, pass through.</li>
+     *   <li>{@code {"window": "<duration>"}} — canonicalizes to
+     *       {@code "window:<duration>"} with the duration re-emitted in the
+     *       same unit letter (via {@link #parseDuration}).</li>
+     *   <li>{@code {"tail": <positive int>}} — canonicalizes to
+     *       {@code "tail:<N>"}.</li>
+     * </ul>
+     *
+     * <p>Entry-scoped errors so a misconfigured deployment fails loud at
+     * boot, not at sweep time. See memo {@code wf-document-v1.md} &sect;03.
+     */
+    private static String parseRevisionRetention(final String name, final JsonValue raw) {
+        if (raw.isString()) {
+            final String s = raw.getAsString().value();
+            if ("latest".equals(s) || "all".equals(s)) {
+                return s;
+            }
+            throw new IllegalArgumentException(
+                    "document registry entry `" + name + "`: unknown revision_retention `"
+                            + s + "` (expected `latest`, `all`, `{\"window\": \"<duration>\"}`, "
+                            + "or `{\"tail\": <positive int>}`)");
+        }
+        if (raw.isObject()) {
+            final JsonObject obj = raw.getAsObject();
+            if (obj.keys().size() != 1) {
+                throw new IllegalArgumentException(
+                        "document registry entry `" + name + "`: revision_retention object must "
+                                + "carry exactly one of `window` / `tail`; got "
+                                + obj.keys().size() + " key(s)");
+            }
+            final String key = obj.keys().iterator().next();
+            final JsonValue value = obj.get(key);
+            switch (key) {
+                case "window": {
+                    if (value == null || !value.isString()) {
+                        throw new IllegalArgumentException(
+                                "document registry entry `" + name + "`: revision_retention "
+                                        + "`window` value must be a duration string like `30d`");
+                    }
+                    final String normalized = parseDuration(name, value.getAsString().value());
+                    return "window:" + normalized;
+                }
+                case "tail": {
+                    if (value == null || !value.isNumber()) {
+                        throw new IllegalArgumentException(
+                                "document registry entry `" + name + "`: revision_retention "
+                                        + "`tail` value must be a positive integer");
+                    }
+                    final long n = value.getAsNumber().value().longValue();
+                    if (n <= 0) {
+                        throw new IllegalArgumentException(
+                                "document registry entry `" + name + "`: revision_retention "
+                                        + "`tail` must be a positive integer, got " + n);
+                    }
+                    return "tail:" + n;
+                }
+                default:
+                    throw new IllegalArgumentException(
+                            "document registry entry `" + name + "`: unknown revision_retention "
+                                    + "discriminant `" + key + "` (expected `window` or `tail`)");
+            }
+        }
+        throw new IllegalArgumentException(
+                "document registry entry `" + name + "`: revision_retention must be a string "
+                        + "or object");
+    }
+
+    /**
+     * Parse a duration literal like {@code 30d}, {@code 24h}, {@code 5m}.
+     * Rejects empty, unknown unit, missing numeric prefix, non-positive.
+     * Returns the canonical form (same digits, same unit letter) so the
+     * wire form re-emits operator intent verbatim.
+     *
+     * <p>Kept adjacent to {@link #parseRevisionRetention} — the two are
+     * one logical parser. The Oxigraph / QLever sibling parsers match
+     * semantics and error wording.
+     */
+    private static String parseDuration(final String name, final String s) {
+        if (s == null || s.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "document registry entry `" + name + "`: revision_retention `window` "
+                            + "duration must not be empty");
+        }
+        final char unit = s.charAt(s.length() - 1);
+        if (unit != 'd' && unit != 'h' && unit != 'm') {
+            throw new IllegalArgumentException(
+                    "document registry entry `" + name + "`: revision_retention `window` "
+                            + "duration `" + s + "` has unknown unit (expected `d`, `h`, or `m`)");
+        }
+        final String digits = s.substring(0, s.length() - 1);
+        if (digits.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "document registry entry `" + name + "`: revision_retention `window` "
+                            + "duration `" + s + "` is missing the numeric prefix");
+        }
+        final long n;
+        try {
+            n = Long.parseLong(digits);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "document registry entry `" + name + "`: revision_retention `window` "
+                            + "duration `" + s + "` numeric prefix is not a non-negative integer");
+        }
+        if (n <= 0) {
+            throw new IllegalArgumentException(
+                    "document registry entry `" + name + "`: revision_retention `window` "
+                            + "duration must be positive, got `" + s + "`");
+        }
+        return "" + n + unit;
     }
 
     /** Presence-and-non-null helper &mdash; atlas.json has no built-in equivalent of Jackson's {@code hasNonNull}. */
