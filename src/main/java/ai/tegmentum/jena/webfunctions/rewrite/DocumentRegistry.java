@@ -35,9 +35,10 @@ import java.util.OptionalInt;
  * valid state and is what every consumer treats as an unconditional
  * no-op. Identical lifecycle to {@link FulltextRegistry}.
  *
- * <p>v0.2 companion to {@link FulltextRegistry}. Config is loaded and
- * validated but not wired into the query pipeline &mdash; v0.2 uses
- * explicit {@code SERVICE ?svc} only, no rewrite pass.
+ * <p>Companion to {@link FulltextRegistry}. As of v1.0 the registry is
+ * consulted by the {@link WfSearchRewrite} pass, which expands
+ * {@code SERVICE <wf-search:name[@time][?opts]>} into a
+ * {@code wf-invoke:} allocation with the entry's config baked in.
  *
  * <p>Java port of the design memo's registry shape; sibling of
  * {@code oxigraph-wf/src/document_registry.rs}.
@@ -230,21 +231,13 @@ public final class DocumentRegistry {
                                     + "declare `revision_retention`");
                 }
                 final String retention = raw.get("revision_retention").getAsString().value();
-                if ("all".equals(retention)) {
-                    // Explicit v0.2 gate: memo &sect;10 defers `all` to v1.0
-                    // (time-travel search requires mirroring historical
-                    // revisions into the search backend). Reject with a
-                    // message that says why, so operators don't think the
-                    // parser is bugged.
-                    throw new IllegalArgumentException(
-                            "document registry entry `" + name + "`: revision_retention `all` "
-                                    + "is deferred to v1.0 (time-travel search); v0.2 accepts "
-                                    + "only `latest`");
-                }
-                if (!"latest".equals(retention)) {
+                // v1.0 lifts the v0.2 gate on `all` — time-travel search
+                // requires the sweep to mirror historical revisions into
+                // the search backend, and the guest/sweep now support it.
+                if (!"latest".equals(retention) && !"all".equals(retention)) {
                     throw new IllegalArgumentException(
                             "document registry entry `" + name + "`: unknown revision_retention `"
-                                    + retention + "` (expected `latest`)");
+                                    + retention + "` (expected `latest` or `all`)");
                 }
                 revisionRetention = retention;
             }
@@ -336,7 +329,7 @@ public final class DocumentRegistry {
         public String optsJson()         { return optsJson; }
         /** {@link OptionalInt#empty()} on federated entries; always present on managed. */
         public OptionalInt sweepIntervalSecs() { return sweepIntervalSecs; }
-        /** Empty string on federated entries; {@code "latest"} on managed (only value accepted in v0.2). */
+        /** Empty string on federated entries; {@code "latest"} or {@code "all"} on managed. */
         public String revisionRetention() { return revisionRetention; }
     }
 }

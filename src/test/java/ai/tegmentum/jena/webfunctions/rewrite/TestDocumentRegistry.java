@@ -245,33 +245,31 @@ public class TestDocumentRegistry {
     }
 
     /**
-     * v0.2 gate: {@code revision_retention: "all"} is deferred to v1.0
-     * per memo &sect;10, because time-travel search requires the sweep to
-     * mirror historical revisions into the search backend. The parser
-     * rejects it with a message that says so.
+     * v1.0 lifts the v0.2 gate on {@code revision_retention: "all"} —
+     * time-travel search is now supported end-to-end (guest, sweep,
+     * URL sugar), so the parser accepts it.
      */
     @Test
-    public void rejectsRevisionRetentionAllWithV02DeferralMessage() {
-        assertThatThrownBy(() -> parse("""
+    public void acceptsRevisionRetentionAll() {
+        final DocumentRegistry reg = parse("""
                 {
                   "documents": [{
-                    "name": "premature",
+                    "name": "manuals",
                     "mode": "managed",
                     "guest_url": "file:///x.wasm",
                     "search_backend": "http://s/",
                     "storage_backend": "http://t/",
-                    "search_index": "premature",
+                    "search_index": "manuals",
                     "sirix_database": "d",
-                    "sirix_resource": "premature",
+                    "sirix_resource": "manuals",
                     "sweep_interval_secs": 300,
                     "revision_retention": "all"
                   }]
-                }"""))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("revision_retention")
-                .hasMessageContaining("all")
-                .hasMessageContaining("v1.0")
-                .hasMessageContaining("premature");
+                }""");
+        final DocumentIndex e = reg.byName("manuals");
+        assertThat(e).isNotNull();
+        assertThat(e.mode()).isEqualTo(DocumentMode.MANAGED);
+        assertThat(e.revisionRetention()).isEqualTo("all");
     }
 
     @Test
