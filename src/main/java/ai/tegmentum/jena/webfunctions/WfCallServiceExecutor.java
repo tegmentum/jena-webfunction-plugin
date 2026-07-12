@@ -54,8 +54,21 @@ import java.util.Map;
  */
 public final class WfCallServiceExecutor implements ChainingServiceExecutor {
 
-    /** SERVICE IRI that steers into this executor; anything else chains through. */
+    /**
+     * SERVICE IRIs that steer into this executor. Both forms are accepted:
+     * <ul>
+     *   <li>{@code http://tegmentum.ai/ns/webfunction/call} — the resolved
+     *       full IRI that ShapeRewrite emits and that queries with a
+     *       {@code PREFIX wf:} declaration also produce after parsing.</li>
+     *   <li>{@code wf:call} — the short prefixed form, kept for callers
+     *       constructing the OpService directly with the literal string
+     *       (e.g., embedded harnesses that bypass query parsing).</li>
+     * </ul>
+     * Anything else chains through to the next executor.
+     */
     public static final String SERVICE_IRI = "wf:call";
+    public static final String SERVICE_IRI_FULL =
+            "http://tegmentum.ai/ns/webfunction/call";
 
     private static final String WF_NS = "http://tegmentum.ai/ns/webfunction/";
     private static final String WF_WASM = WF_NS + "wasm";
@@ -69,7 +82,11 @@ public final class WfCallServiceExecutor implements ChainingServiceExecutor {
             final ExecutionContext ctx,
             final ServiceExecutor next) {
         final Node svcIri = opService.getService();
-        if (!svcIri.isURI() || !SERVICE_IRI.equals(svcIri.getURI())) {
+        if (!svcIri.isURI()) {
+            return next.createExecution(opService, original, binding, ctx);
+        }
+        final String uri = svcIri.getURI();
+        if (!SERVICE_IRI.equals(uri) && !SERVICE_IRI_FULL.equals(uri)) {
             return next.createExecution(opService, original, binding, ctx);
         }
 

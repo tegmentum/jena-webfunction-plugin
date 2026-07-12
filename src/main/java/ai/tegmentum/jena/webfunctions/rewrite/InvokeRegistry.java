@@ -56,6 +56,20 @@ public final class InvokeRegistry {
         }
     }
 
+    /**
+     * Non-destructive lookup: read a spec without removing it. Mirrors the
+     * peek variant of the Rust {@code pop_by_id} accessor. Jena's SERVICE
+     * executor is invoked once per outer binding — a destructive
+     * {@link #take(long)} would fail the second call — so the
+     * {@code wf-invoke:} service dispatcher uses this accessor to preserve
+     * the entry across re-entrance.
+     */
+    public Optional<InvokeSpec> get(final long id) {
+        synchronized (inner) {
+            return Optional.ofNullable(inner.get(id));
+        }
+    }
+
     public int size() {
         synchronized (inner) {
             return inner.size();

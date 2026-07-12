@@ -40,7 +40,12 @@ import java.util.Map;
 public final class ShapeRewrite {
 
     static final String WF_NS = "http://tegmentum.ai/ns/webfunction/";
-    static final String WF_CALL_IRI = WF_NS + "call";
+    /**
+     * Fully-qualified IRI for the {@code SERVICE <wf:call>} dispatch
+     * target. Public so {@link ai.tegmentum.jena.webfunctions.WfCallService}
+     * can guard against false-matching it as a wasm URL.
+     */
+    public static final String WF_CALL_IRI = WF_NS + "call";
     static final String WF_WASM_IRI = WF_NS + "wasm";
     static final String WF_ARG_IRI = WF_NS + "arg";
     static final String RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";

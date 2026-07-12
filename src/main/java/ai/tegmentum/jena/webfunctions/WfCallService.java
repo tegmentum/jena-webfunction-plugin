@@ -1,5 +1,8 @@
 package ai.tegmentum.jena.webfunctions;
 
+import ai.tegmentum.jena.webfunctions.rewrite.InvokeRegistry;
+import ai.tegmentum.jena.webfunctions.rewrite.ShapeRewrite;
+
 import org.apache.jena.graph.Node;
 import org.apache.jena.sparql.algebra.Op;
 import org.apache.jena.sparql.algebra.op.OpExtend;
@@ -81,7 +84,18 @@ public final class WfCallService implements ChainingServiceExecutor {
     }
 
     private static boolean matchesWasmUrl(final String uri) {
+        // Exclude the substrate's own dispatch IRIs — they use http: or a
+        // dedicated scheme but must never be handed to the wasm loader.
+        // Without this guard the SERVICE handler would HTTP-fetch its own
+        // dispatch URL, get empty bytes, and crash wasmtime4j with
+        // "Parameter 'componentBytes' must not be empty".
+        if (ShapeRewrite.WF_CALL_IRI.equals(uri)) {
+            return false;
+        }
         final String lower = uri.toLowerCase();
+        if (lower.startsWith(InvokeRegistry.WF_INVOKE_SCHEME)) {
+            return false;
+        }
         return lower.startsWith("file:")
                 || lower.startsWith("http:")
                 || lower.startsWith("https:")
