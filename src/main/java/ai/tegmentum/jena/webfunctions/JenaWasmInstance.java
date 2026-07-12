@@ -134,7 +134,53 @@ public final class JenaWasmInstance implements Closeable {
             linker.addWitHostFunction(
                 "stardog:webfunction/host@0.4.0#invoke-wasm",
                 HostCallbacks.invokeWasm());
+            // v0.5.0 additive imports — sink-open / sink-execute /
+            // sink-close for out-of-graph destinations (SQLite in v0.5), plus
+            // a signature-changed execute-update that drops the bindings arg.
+            // The other six imports are identical to v0.4.0 and re-registered
+            // under the @0.5.0 instance name so guests targeting v0.5 link
+            // cleanly.
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#execute-query",
+                HostCallbacks.executeQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#callback-depth",
+                HostCallbacks.callbackDepth());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#execute-update",
+                HostCallbacks.executeUpdateV05());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#prepare-query",
+                HostCallbacks.prepareQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#run-prepared",
+                HostCallbacks.runPrepared());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#follow-predicate",
+                HostCallbacks.followPredicate());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#invoke-wasm",
+                HostCallbacks.invokeWasm());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#sink-open",
+                HostCallbacks.sinkOpen());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#sink-execute",
+                HostCallbacks.sinkExecute());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.5.0#sink-close",
+                HostCallbacks.sinkClose());
         }
+        // wf:fulltext/host@0.1.0 — one import, `http-post-json`. The
+        // wf_fulltext guest declares its own WIT world (versioned under
+        // wf:fulltext, not stardog:webfunction), so this binds independently
+        // of the callback-enabled flag: the flag is about re-entering the
+        // graph, this import reaches an external fulltext backend. Guests
+        // that never import wf:fulltext see no change in behaviour — the
+        // wasm engine only pulls what the component's imports section names.
+        linker.addWitHostFunction(
+            "wf:fulltext/host@0.1.0#http-post-json",
+            HostCallbacks.httpPostJson());
         this.instance = component.instantiate(linker.build());
     }
 

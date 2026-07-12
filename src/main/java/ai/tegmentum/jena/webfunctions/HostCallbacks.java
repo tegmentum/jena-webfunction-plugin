@@ -254,6 +254,199 @@ public final class HostCallbacks {
         };
     }
 
+    /**
+     * v0.5 {@code execute-update: func(update: string) -> result<_, string>}.
+     *
+     * <p>Signature difference from v0.3.1's execute-update — v0.5 drops the
+     * bindings list. The guest is expected to inline any bound values before
+     * calling. Parses via Jena's UpdateExec builder and applies against the
+     * caller's Dataset (same {@link CallbackContext#executeUpdate} that
+     * v0.3.1 uses, passed an empty QuerySolutionMap).
+     */
+    public static WitHostFunction executeUpdateV05() {
+        return args -> {
+            if (!WebFunctionConfig.callbackEnabled()) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback disabled by webfunctions.callback.enabled=false")) };
+            }
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback: no context bound")) };
+            }
+            try {
+                final String sparql = ((ComponentVal) args[0]).asString();
+                ctx.enter();
+                try {
+                    ctx.executeUpdate(sparql, new org.apache.jena.query.QuerySolutionMap());
+                    return new Object[] { ComponentVal.ok(null) };
+                } finally {
+                    ctx.exit();
+                }
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
+    /**
+     * v0.5 {@code sink-open: func(url: string) -> result<u32, string>}.
+     *
+     * <p>Parses the URL, dispatches on scheme (only {@code sqlite://} is
+     * wired in v0.5), and stores the resulting connection in the frame's
+     * sink table. The returned handle is the slot index.
+     */
+    public static WitHostFunction sinkOpen() {
+        return args -> {
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf sink-open: no context bound")) };
+            }
+            try {
+                final String url = ((ComponentVal) args[0]).asString();
+                final Sink sink = SinkOpen.open(url);
+                final int handle = ctx.addSink(sink);
+                return new Object[] { ComponentVal.ok(ComponentVal.u32((long) handle)) };
+            } catch (Exception e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "sink-open: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
+            }
+        };
+    }
+
+    /**
+     * v0.5 {@code sink-execute: func(handle: u32, query: string, params: list<value>)
+     *  -> result<binding-sets, string>}.
+     *
+     * <p>Looks up the connection by handle, delegates to the backend's
+     * {@link Sink#execute} which does the WIT ↔ SQL param binding and
+     * result-set encoding.
+     */
+    public static WitHostFunction sinkExecute() {
+        return args -> {
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf sink-execute: no context bound")) };
+            }
+            try {
+                final int handle = (int) ((ComponentVal) args[0]).asU32();
+                final String query = ((ComponentVal) args[1]).asString();
+                final List<ComponentVal> params = ((ComponentVal) args[2]).asList();
+                final Sink sink = ctx.getSink(handle);
+                if (sink == null) {
+                    return new Object[] { ComponentVal.err(ComponentVal.string(
+                        "sink-execute: stale or closed handle " + handle)) };
+                }
+                final ComponentVal out = sink.execute(query, params);
+                return new Object[] { ComponentVal.ok(out) };
+            } catch (Exception e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "sink-execute: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
+            }
+        };
+    }
+
+    /**
+     * v0.5 {@code sink-close: func(handle: u32) -> result<_, string>}.
+     *
+     * <p>Explicit close is optional — {@link CallbackContext#unbindIfOutermost}
+     * closes any leftover sinks when the outermost wf:call frame exits. Guests
+     * that need to release a scarce resource (Postgres pool slot) early can
+     * call this.
+     */
+    public static WitHostFunction sinkClose() {
+        return args -> {
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf sink-close: no context bound")) };
+            }
+            try {
+                final int handle = (int) ((ComponentVal) args[0]).asU32();
+                if (!ctx.closeSink(handle)) {
+                    return new Object[] { ComponentVal.err(ComponentVal.string(
+                        "sink-close: stale or already-closed handle " + handle)) };
+                }
+                return new Object[] { ComponentVal.ok(null) };
+            } catch (Exception e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "sink-close: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
+            }
+        };
+    }
+
+    /**
+     * {@code wf:fulltext/host@0.1.0#http-post-json:
+     *  func(url: string, body: string) -> result<string, string>}.
+     *
+     * <p>The wf_fulltext guest imports this to POST a JSON search request
+     * to Manticore (OpenSearch as a follow-up per the wf-fulltext design
+     * memo). Stateless — does not touch {@link CallbackContext}, does not
+     * respect {@code webfunctions.callback.enabled} (that flag is about
+     * re-entering the graph; this import reaches an external service).
+     *
+     * <p>Error contract, mirrored across every substrate engine:
+     * <ul>
+     *   <li>2xx: {@code Ok(response_body_verbatim)}</li>
+     *   <li>non-2xx: {@code Err("HTTP <code>: <body>")}</li>
+     *   <li>transport / URL / IO / interrupt: {@code Err("http transport: <details>")}</li>
+     * </ul>
+     * Timeout: 30 seconds — matches the oxigraph-wf substrate and
+     * SirixSink's connect + read ceiling so a wf:call frame observes one
+     * honest deadline regardless of destination.
+     */
+    public static WitHostFunction httpPostJson() {
+        return args -> {
+            try {
+                final String url = ((ComponentVal) args[0]).asString();
+                final String body = ((ComponentVal) args[1]).asString();
+                return new Object[] { httpPostJsonImpl(url, body) };
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "http transport: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
+            }
+        };
+    }
+
+    private static ComponentVal httpPostJsonImpl(final String url, final String body) {
+        final java.net.URI uri;
+        try {
+            uri = java.net.URI.create(url);
+        } catch (IllegalArgumentException iae) {
+            return ComponentVal.err(ComponentVal.string(
+                "http transport: url did not parse: " + iae.getMessage()));
+        }
+        final java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(30))
+                .build();
+        final java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri)
+                .timeout(java.time.Duration.ofSeconds(30))
+                .header("Content-Type", "application/json")
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(
+                    body, java.nio.charset.StandardCharsets.UTF_8))
+                .build();
+        try {
+            final java.net.http.HttpResponse<String> response = client.send(
+                request, java.net.http.HttpResponse.BodyHandlers.ofString(
+                    java.nio.charset.StandardCharsets.UTF_8));
+            final int status = response.statusCode();
+            if (status >= 200 && status < 300) {
+                return ComponentVal.ok(ComponentVal.string(response.body()));
+            }
+            return ComponentVal.err(ComponentVal.string(
+                "HTTP " + status + ": " + response.body()));
+        } catch (java.io.IOException ioe) {
+            return ComponentVal.err(ComponentVal.string(
+                "http transport: " + (ioe.getMessage() == null ? ioe.toString() : ioe.getMessage())));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return ComponentVal.err(ComponentVal.string("http transport: interrupted"));
+        }
+    }
+
     /** {@code execute-update: func(sparql: string, bindings: list<binding>)
      *  -> result<_, string>}  (v0.3.1). */
     public static WitHostFunction executeUpdate() {
