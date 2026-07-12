@@ -4,6 +4,7 @@ import ai.tegmentum.jena.webfunctions.WebFunctionInit;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasMap;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasRewriteState;
 import ai.tegmentum.jena.webfunctions.rewrite.ConversionRegistry;
+import ai.tegmentum.jena.webfunctions.rewrite.FulltextRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.InvokeRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.RewritePipeline;
 import ai.tegmentum.jena.webfunctions.rewrite.ShapeRegistry;
@@ -58,7 +59,8 @@ import java.util.Map;
  *   ai.tegmentum.jena.webfunctions.conformance.ConformanceMain \
  *   --data path/to/data.ttl --query path/to/query.sparql \
  *   [--alias-config alias.json] [--shape-config shape.json] \
- *   [--conversion-config conversion.json] [--partial-config partial.json]
+ *   [--conversion-config conversion.json] [--partial-config partial.json] \
+ *   [--fulltext-config fulltext.json]
  * }</pre>
  *
  * <p>Exit code 0 on success; non-zero with an error line on stderr on
@@ -70,20 +72,41 @@ public final class ConformanceMain {
     private ConformanceMain() {}
 
     public static void main(final String[] args) {
+        final int rc;
         try {
-            run(args, System.out);
+            rc = run(args, System.out, System.err);
         } catch (Throwable t) {
             System.err.println("conformance-main: " + t.getMessage());
             t.printStackTrace(System.err);
             System.exit(1);
+            return;
         }
+        if (rc != 0) System.exit(rc);
     }
 
     /**
      * Test-friendly entry point. Doesn't call {@link System#exit(int)};
-     * exceptions propagate.
+     * exceptions propagate. Delegates to
+     * {@link #run(String[], PrintStream, PrintStream)}; non-zero exit
+     * codes (e.g. an invalid {@code --fulltext-config}) surface as a
+     * {@link RuntimeException} so callers that don't observe stderr
+     * still see the failure. The config-error message itself is written
+     * to {@link System#err} by the underlying runner.
      */
     public static void run(final String[] args, final PrintStream out) throws Exception {
+        final int rc = run(args, out, System.err);
+        if (rc != 0) {
+            throw new RuntimeException("conformance-main exited with code " + rc);
+        }
+    }
+
+    /**
+     * Full entry point exposing stderr + a returned exit code so callers
+     * (main, shell-out tests) can distinguish the config-error path from
+     * the successful-run path without pattern-matching exception
+     * messages.
+     */
+    public static int run(final String[] args, final PrintStream out, final PrintStream err) throws Exception {
         final Map<String, String> parsed = parseArgs(args);
         final Path dataPath = requirePathArg(parsed, "--data");
         final Path queryPath = requirePathArg(parsed, "--query");
@@ -91,6 +114,34 @@ public final class ConformanceMain {
         final Path shapeCfg = optionalPathArg(parsed, "--shape-config");
         final Path conversionCfg = optionalPathArg(parsed, "--conversion-config");
         final Path partialCfg = optionalPathArg(parsed, "--partial-config");
+        final Path fulltextCfg = optionalPathArg(parsed, "--fulltext-config");
+
+        // Fulltext registry is loaded independently of the rewrite
+        // pipeline: it stores config only, and the filter-fold rewrite
+        // pass that consumes it is a separate follow-up. Presence of
+        // the flag exercises the parser + validation surface end-to-end;
+        // absence keeps the runner identical to the pre-fulltext build.
+        final FulltextRegistry fulltextRegistry;
+        try {
+            fulltextRegistry = fulltextCfg == null
+                    ? FulltextRegistry.empty()
+                    : FulltextRegistry.loadFromJson(fulltextCfg);
+        } catch (Exception e) {
+            err.println("fulltext config error: " + e.getMessage());
+            return 2;
+        }
+        // Diagnostic on stderr so the parity harness (and the
+        // ConformanceMainFulltextTest) can assert the registry
+        // populated correctly without smuggling state through a static.
+        if (fulltextCfg != null) {
+            err.println("loaded " + fulltextRegistry.size()
+                    + " fulltext index(es) from " + fulltextCfg);
+        }
+        // Reference the registry to keep the (currently pipeline-agnostic)
+        // load side-effect from being dead-code-eliminated by future
+        // reviewers. The filter-fold rewrite is a follow-up pass; when
+        // it lands, this local moves into pipelineCtx.
+        assert fulltextRegistry != null;
 
         // The subsystem service file usually wires this up automatically,
         // but calling directly is idempotent and covers callers that
@@ -136,6 +187,7 @@ public final class ConformanceMain {
             ResultSetFormatter.outputAsJSON(out, wrapped);
             out.flush();
         }
+        return 0;
     }
 
     // ---------------------------------------------------------------
