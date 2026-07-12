@@ -147,7 +147,16 @@
                                 <transformer
                                         implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                                 <transformer
-                                        implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer"/>
+                                        implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                                    <!--
+                                        Declare a Main-Class so the
+                                        cross-engine conformance suite
+                                        can invoke the runner without
+                                        needing to spell it out on the
+                                        java command line each time.
+                                    -->
+                                    <mainClass>ai.tegmentum.jena.webfunctions.conformance.ConformanceMain</mainClass>
+                                </transformer>
                             </transformers>
                             <filters>
                                 <filter>
