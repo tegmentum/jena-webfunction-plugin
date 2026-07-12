@@ -35,6 +35,7 @@ public final class RewritePipeline {
         public final ConversionRegistry conversionRegistry;
         public final AliasMap aliasMap;
         public final ShapeRegistry shapeRegistry;
+        public final FulltextRegistry fulltextRegistry;
         public final String wfFetchUrl;
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -42,10 +43,20 @@ public final class RewritePipeline {
                        final AliasMap aliasMap,
                        final ShapeRegistry shapeRegistry,
                        final String wfFetchUrl) {
+            this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry, null, wfFetchUrl);
+        }
+
+        public Context(final InvokeRegistry invokeRegistry,
+                       final ConversionRegistry conversionRegistry,
+                       final AliasMap aliasMap,
+                       final ShapeRegistry shapeRegistry,
+                       final FulltextRegistry fulltextRegistry,
+                       final String wfFetchUrl) {
             this.invokeRegistry = invokeRegistry;
             this.conversionRegistry = conversionRegistry;
             this.aliasMap = aliasMap;
             this.shapeRegistry = shapeRegistry;
+            this.fulltextRegistry = fulltextRegistry;
             this.wfFetchUrl = wfFetchUrl;
         }
     }
@@ -71,7 +82,12 @@ public final class RewritePipeline {
         // 3. Alias rewrite — alias → canonical everywhere.
         final AliasRewrite.Result aliasRes = AliasRewrite.rewrite(cursor, ctx.aliasMap);
         cursor = aliasRes.rewrittenOp;
-        // 4. Shape rewrite — cover BGPs with SERVICE <wf:call>.
+        // 4. Fulltext filter-fold — lift FILTER over indexed predicates
+        //    into a SERVICE <wf-invoke:> dispatch (memo §06). Runs after
+        //    Alias so we see canonical predicate IRIs, and before Shape so
+        //    shape-covered BGPs still take precedence for BGP rewriting.
+        cursor = FulltextRewrite.rewrite(cursor, ctx.fulltextRegistry, ctx.invokeRegistry);
+        // 5. Shape rewrite — cover BGPs with SERVICE <wf:call>.
         cursor = ShapeRewrite.rewrite(cursor, ctx.shapeRegistry, ctx.wfFetchUrl);
         return new Result(cursor, aliasRes.state);
     }
