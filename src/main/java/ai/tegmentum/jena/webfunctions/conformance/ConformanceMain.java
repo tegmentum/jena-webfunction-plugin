@@ -4,6 +4,7 @@ import ai.tegmentum.jena.webfunctions.WebFunctionInit;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasMap;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasRewriteState;
 import ai.tegmentum.jena.webfunctions.rewrite.ConversionRegistry;
+import ai.tegmentum.jena.webfunctions.rewrite.DocumentRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.FulltextRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.InvokeRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.RewritePipeline;
@@ -60,7 +61,7 @@ import java.util.Map;
  *   --data path/to/data.ttl --query path/to/query.sparql \
  *   [--alias-config alias.json] [--shape-config shape.json] \
  *   [--conversion-config conversion.json] [--partial-config partial.json] \
- *   [--fulltext-config fulltext.json]
+ *   [--fulltext-config fulltext.json] [--document-config document.json]
  * }</pre>
  *
  * <p>Exit code 0 on success; non-zero with an error line on stderr on
@@ -88,10 +89,11 @@ public final class ConformanceMain {
      * Test-friendly entry point. Doesn't call {@link System#exit(int)};
      * exceptions propagate. Delegates to
      * {@link #run(String[], PrintStream, PrintStream)}; non-zero exit
-     * codes (e.g. an invalid {@code --fulltext-config}) surface as a
-     * {@link RuntimeException} so callers that don't observe stderr
-     * still see the failure. The config-error message itself is written
-     * to {@link System#err} by the underlying runner.
+     * codes (e.g. an invalid {@code --fulltext-config} or
+     * {@code --document-config}) surface as a {@link RuntimeException} so
+     * callers that don't observe stderr still see the failure. The
+     * config-error message itself is written to {@link System#err} by
+     * the underlying runner.
      */
     public static void run(final String[] args, final PrintStream out) throws Exception {
         final int rc = run(args, out, System.err);
@@ -115,6 +117,7 @@ public final class ConformanceMain {
         final Path conversionCfg = optionalPathArg(parsed, "--conversion-config");
         final Path partialCfg = optionalPathArg(parsed, "--partial-config");
         final Path fulltextCfg = optionalPathArg(parsed, "--fulltext-config");
+        final Path documentCfg = optionalPathArg(parsed, "--document-config");
 
         // Fulltext registry is loaded independently of the rewrite
         // pipeline: it stores config only, and the filter-fold rewrite
@@ -142,6 +145,26 @@ public final class ConformanceMain {
         // reviewers. The filter-fold rewrite is a follow-up pass; when
         // it lands, this local moves into pipelineCtx.
         assert fulltextRegistry != null;
+
+        // Document registry (v0.2 wf_document companion). Same load-and-
+        // report shape as the fulltext registry above; not wired into the
+        // rewrite pipeline because v0.2 dispatches wf_document exclusively
+        // through explicit SERVICE ?svc. The flag surface exercises the
+        // parser + validation only.
+        final DocumentRegistry documentRegistry;
+        try {
+            documentRegistry = documentCfg == null
+                    ? DocumentRegistry.empty()
+                    : DocumentRegistry.loadFromJson(documentCfg);
+        } catch (Exception e) {
+            err.println("document config error: " + e.getMessage());
+            return 2;
+        }
+        if (documentCfg != null) {
+            err.println("loaded " + documentRegistry.size()
+                    + " document(s) from " + documentCfg);
+        }
+        assert documentRegistry != null;
 
         // The subsystem service file usually wires this up automatically,
         // but calling directly is idempotent and covers callers that
