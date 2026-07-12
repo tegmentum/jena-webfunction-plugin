@@ -103,7 +103,11 @@ public final class WfInvokeService implements ChainingServiceExecutor {
         final CallbackContext cbCtx = CallbackContext.bind(ctx);
         final List<WitValueMarshaller.Row> rows;
         try (JenaWasmInstance instance = new JenaWasmInstance(wasmUrl)) {
-            rows = instance.evaluate(args);
+            // Optional caller override lets callers dispatch a specific
+            // exported function (e.g. wf:fulltext's `search`); when null,
+            // the resolver falls through to prefer `evaluate` then to a
+            // single top-level function export.
+            rows = instance.evaluate(spec.entryPoint, args);
         } catch (IOException e) {
             throw new QueryException("wf-invoke: " + e.getMessage(), e);
         } finally {

@@ -30,10 +30,23 @@ public final class InvokeRegistry {
     public static final class InvokeSpec {
         public final String wasmUrl;
         public final List<Node> args;
+        /**
+         * Optional caller override for the guest's exported function name.
+         * When null the dispatcher auto-detects: prefer {@code evaluate}
+         * (substrate-wide default), then fall back to a single top-level
+         * function export. See
+         * {@link ai.tegmentum.jena.webfunctions.JenaWasmInstance#resolveEntryPoint(String)}.
+         */
+        public final String entryPoint;
 
         public InvokeSpec(final String wasmUrl, final List<Node> args) {
+            this(wasmUrl, args, null);
+        }
+
+        public InvokeSpec(final String wasmUrl, final List<Node> args, final String entryPoint) {
             this.wasmUrl = wasmUrl;
             this.args = Collections.unmodifiableList(args);
+            this.entryPoint = entryPoint;
         }
     }
 

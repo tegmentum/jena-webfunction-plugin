@@ -126,7 +126,13 @@ public final class PartialRewrite {
                 final NodeValue nv = a.getConstant();
                 constArgs.add(nv.asNode());
             }
-            final long id = registry.insert(new InvokeRegistry.InvokeSpec(wasmUrl, constArgs));
+            // entryPoint left null — the fold-parity path preserves the
+            // historical `evaluate` dispatch. The dispatcher's auto-detect
+            // resolves it back to `evaluate` for every existing guest, and
+            // to the single top-level export for guests like wf_fulltext
+            // that name their export differently.
+            final long id = registry.insert(
+                    new InvokeRegistry.InvokeSpec(wasmUrl, constArgs, null));
             return NodeFactory.createURI(InvokeRegistry.iriFor(id));
         }
 

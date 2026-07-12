@@ -48,11 +48,21 @@ public final class JenaWasmInstance implements Closeable {
     private static final Object ENGINE_LOCK = new Object();
     private static final ConcurrentHashMap<URL, Component> COMPONENT_CACHE =
             new ConcurrentHashMap<>();
+    /**
+     * Resolved auto-detected entry-point name, cached per URL so we only
+     * enumerate the component's top-level function exports on the first
+     * invocation. Explicit {@code InvokeSpec.entryPoint} overrides bypass
+     * this cache entirely.
+     */
+    private static final ConcurrentHashMap<URL, String> ENTRY_POINT_CACHE =
+            new ConcurrentHashMap<>();
 
+    private final URL wasmUrl;
     private ComponentInstance instance;
     private boolean closed;
 
     public JenaWasmInstance(final URL wasmUrl) throws IOException {
+        this.wasmUrl = wasmUrl;
         final Component component = componentFor(wasmUrl);
         final DefaultLinkingContext.Builder linker = DefaultLinkingContext.builder();
         if (WebFunctionConfig.callbackEnabled()) {
@@ -221,12 +231,88 @@ public final class JenaWasmInstance implements Closeable {
 
     /**
      * Invoke the component's {@code evaluate} export with the given arguments.
+     * Delegates to {@link #evaluate(String, Node...)} with a null override,
+     * i.e. the substrate's default auto-detect (prefer {@code evaluate},
+     * fall back to a single top-level function export).
      */
     public List<WitValueMarshaller.Row> evaluate(final Node... args) throws IOException {
+        return evaluate(null, args);
+    }
+
+    /**
+     * Invoke the component's exported function with the given arguments.
+     * When {@code entryPointOverride} is non-null it is used verbatim;
+     * otherwise the substrate resolves it per the standard order:
+     * <ol>
+     *   <li>Prefer {@code evaluate} — the substrate-wide default, every
+     *       existing guest exports it.</li>
+     *   <li>Fall back to a single top-level function export
+     *       (e.g. wf_fulltext exports {@code search}).</li>
+     *   <li>Otherwise error, listing the visible exports.</li>
+     * </ol>
+     * Mirrors {@code oxigraph-wf/src/wf_call.rs::resolve_entry_point}.
+     */
+    public List<WitValueMarshaller.Row> evaluate(final String entryPointOverride,
+                                                 final Node... args) throws IOException {
+        final String entry = resolveEntryPoint(entryPointOverride);
         final WitValue result = (WitValue) instance.invokeWit(
-                "evaluate", WitValueMarshaller.toWitArgs(args));
+                entry, WitValueMarshaller.toWitArgs(args));
         final WitValue ok = unwrapOk(result);
         return WitValueMarshaller.bindingSetsFromWit(ok);
+    }
+
+    /**
+     * Resolve which exported function this instance should invoke.
+     *
+     * <p>Resolution order (mirrors
+     * {@code oxigraph-wf/src/wf_call.rs::resolve_entry_point}):
+     * <ol>
+     *   <li>Caller-supplied {@code override} — used verbatim.</li>
+     *   <li>{@code evaluate} — the substrate default. Every stardog:webfunction
+     *       guest exports it.</li>
+     *   <li>A single top-level function export. Covers guests whose WIT
+     *       world genuinely names its export differently (wf:fulltext
+     *       exports {@code search}).</li>
+     *   <li>Otherwise throw, listing the visible exports so the caller can
+     *       pick one via {@code InvokeSpec.entryPoint}.</li>
+     * </ol>
+     * The auto-detected name is memoised per URL — overrides bypass the cache.
+     */
+    public String resolveEntryPoint(final String override) {
+        if (override != null && !override.isEmpty()) {
+            return override;
+        }
+        return ENTRY_POINT_CACHE.computeIfAbsent(this.wasmUrl, u ->
+                resolveEntryPoint(null, instance.exportedFunctions(), u.toString()));
+    }
+
+    /**
+     * Pure resolution — same 4-step semantics as
+     * {@link #resolveEntryPoint(String)} but without any component
+     * interaction. Exposed at package scope so tests can exercise the
+     * ambiguous-multi-export path without a matching fixture.
+     */
+    static String resolveEntryPoint(final String override,
+                                    final List<String> topLevelExports,
+                                    final String urlForErrors) {
+        if (override != null && !override.isEmpty()) {
+            return override;
+        }
+        if (topLevelExports.contains("evaluate")) {
+            return "evaluate";
+        }
+        if (topLevelExports.isEmpty()) {
+            throw new IllegalStateException(
+                    "component at " + urlForErrors
+                    + " has no function exports at the top level");
+        }
+        if (topLevelExports.size() == 1) {
+            return topLevelExports.get(0);
+        }
+        throw new IllegalStateException(
+                "component at " + urlForErrors
+                + " has multiple function exports " + topLevelExports
+                + " and no `evaluate` — specify one via InvokeSpec.entryPoint");
     }
 
     /**
@@ -442,6 +528,7 @@ public final class JenaWasmInstance implements Closeable {
     static void resetCache() {
         COMPONENT_CACHE.forEach((k, c) -> c.close());
         COMPONENT_CACHE.clear();
+        ENTRY_POINT_CACHE.clear();
         synchronized (ENGINE_LOCK) {
             if (SHARED_ENGINE != null) {
                 SHARED_ENGINE.close();
