@@ -18,6 +18,11 @@ import org.apache.jena.sparql.algebra.Op;
  *   <li>{@link AliasRewrite} — substitute IRI aliases with their
  *       canonical form and record the reverse map for the solution
  *       serializer.</li>
+ *   <li>{@link WfFederationRewrite} — assign BGP triples to
+ *       registered federated sources; emits {@code SERVICE} clauses
+ *       (raw endpoint for SPARQL sources, substrate URL sugar for
+ *       {@code wf-*} sources). Runs before wf-search so the
+ *       synthesised {@code wf-search:} URIs are visible to it.</li>
  *   <li>{@link WfSearchRewrite} — expand
  *       {@code SERVICE <wf-search:name[@time][?opts]>} into a
  *       {@code wf-invoke:} allocation with the registered document
@@ -43,6 +48,7 @@ public final class RewritePipeline {
         public final ShapeRegistry shapeRegistry;
         public final FulltextRegistry fulltextRegistry;
         public final DocumentRegistry documentRegistry;
+        public final FederationRegistry federationRegistry;
         public final String wfFetchUrl;
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -50,7 +56,8 @@ public final class RewritePipeline {
                        final AliasMap aliasMap,
                        final ShapeRegistry shapeRegistry,
                        final String wfFetchUrl) {
-            this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry, null, null, wfFetchUrl);
+            this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
+                    null, null, null, wfFetchUrl);
         }
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -60,7 +67,7 @@ public final class RewritePipeline {
                        final FulltextRegistry fulltextRegistry,
                        final String wfFetchUrl) {
             this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
-                    fulltextRegistry, null, wfFetchUrl);
+                    fulltextRegistry, null, null, wfFetchUrl);
         }
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -70,12 +77,25 @@ public final class RewritePipeline {
                        final FulltextRegistry fulltextRegistry,
                        final DocumentRegistry documentRegistry,
                        final String wfFetchUrl) {
+            this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
+                    fulltextRegistry, documentRegistry, null, wfFetchUrl);
+        }
+
+        public Context(final InvokeRegistry invokeRegistry,
+                       final ConversionRegistry conversionRegistry,
+                       final AliasMap aliasMap,
+                       final ShapeRegistry shapeRegistry,
+                       final FulltextRegistry fulltextRegistry,
+                       final DocumentRegistry documentRegistry,
+                       final FederationRegistry federationRegistry,
+                       final String wfFetchUrl) {
             this.invokeRegistry = invokeRegistry;
             this.conversionRegistry = conversionRegistry;
             this.aliasMap = aliasMap;
             this.shapeRegistry = shapeRegistry;
             this.fulltextRegistry = fulltextRegistry;
             this.documentRegistry = documentRegistry;
+            this.federationRegistry = federationRegistry;
             this.wfFetchUrl = wfFetchUrl;
         }
     }
@@ -101,7 +121,13 @@ public final class RewritePipeline {
         // 3. Alias rewrite — alias → canonical everywhere.
         final AliasRewrite.Result aliasRes = AliasRewrite.rewrite(cursor, ctx.aliasMap);
         cursor = aliasRes.rewrittenOp;
-        // 4. wf-search URL sugar — expand SERVICE <wf-search:name...> into
+        // 4. Federation rewrite — assign registered BGP triples to their
+        //    federated source and emit SERVICE clauses. Runs before
+        //    wf-search so the synthesised `wf-search:` URIs are visible
+        //    to that pass; a `wf-search:`-typed source produces the same
+        //    URL sugar a user would have written by hand.
+        cursor = WfFederationRewrite.rewrite(cursor, ctx.federationRegistry, ctx.invokeRegistry);
+        // 5. wf-search URL sugar — expand SERVICE <wf-search:name...> into
         //    a SERVICE <wf-invoke:> allocation with registry config baked
         //    in (wf-document-v1.md §05). Runs after Alias so the SERVICE
         //    URI is already canonical, and before Fulltext/Shape so the

@@ -5,6 +5,7 @@ import ai.tegmentum.jena.webfunctions.rewrite.AliasMap;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasRewriteState;
 import ai.tegmentum.jena.webfunctions.rewrite.ConversionRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.DocumentRegistry;
+import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.FulltextRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.InvokeRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.RewritePipeline;
@@ -61,7 +62,8 @@ import java.util.Map;
  *   --data path/to/data.ttl --query path/to/query.sparql \
  *   [--alias-config alias.json] [--shape-config shape.json] \
  *   [--conversion-config conversion.json] [--partial-config partial.json] \
- *   [--fulltext-config fulltext.json] [--document-config document.json]
+ *   [--fulltext-config fulltext.json] [--document-config document.json] \
+ *   [--federation-config federation.json]
  * }</pre>
  *
  * <p>Exit code 0 on success; non-zero with an error line on stderr on
@@ -89,8 +91,9 @@ public final class ConformanceMain {
      * Test-friendly entry point. Doesn't call {@link System#exit(int)};
      * exceptions propagate. Delegates to
      * {@link #run(String[], PrintStream, PrintStream)}; non-zero exit
-     * codes (e.g. an invalid {@code --fulltext-config} or
-     * {@code --document-config}) surface as a {@link RuntimeException} so
+     * codes (e.g. an invalid {@code --fulltext-config},
+     * {@code --document-config}, or {@code --federation-config}) surface
+     * as a {@link RuntimeException} so
      * callers that don't observe stderr still see the failure. The
      * config-error message itself is written to {@link System#err} by
      * the underlying runner.
@@ -118,6 +121,7 @@ public final class ConformanceMain {
         final Path partialCfg = optionalPathArg(parsed, "--partial-config");
         final Path fulltextCfg = optionalPathArg(parsed, "--fulltext-config");
         final Path documentCfg = optionalPathArg(parsed, "--document-config");
+        final Path federationCfg = optionalPathArg(parsed, "--federation-config");
 
         // Fulltext registry is loaded independently of the rewrite
         // pipeline: it stores config only, and the filter-fold rewrite
@@ -166,6 +170,24 @@ public final class ConformanceMain {
         }
         assert documentRegistry != null;
 
+        // Federation registry (wf_federation v0.1). Load-and-report shape
+        // matches the fulltext / document registries; wired into the
+        // rewrite pipeline below so a `--federation-config` invocation
+        // actually rewrites BGPs into SERVICE calls.
+        final FederationRegistry federationRegistry;
+        try {
+            federationRegistry = federationCfg == null
+                    ? FederationRegistry.empty()
+                    : FederationRegistry.loadFromJson(federationCfg);
+        } catch (Exception e) {
+            err.println("federation config error: " + e.getMessage());
+            return 2;
+        }
+        if (federationCfg != null) {
+            err.println("loaded " + federationRegistry.size()
+                    + " federation source(s) from " + federationCfg);
+        }
+
         // The subsystem service file usually wires this up automatically,
         // but calling directly is idempotent and covers callers that
         // bypass the standard classloader-driven init (e.g., embedded
@@ -183,7 +205,8 @@ public final class ConformanceMain {
         final InvokeRegistry invokeRegistry = new InvokeRegistry();
 
         final RewritePipeline.Context pipelineCtx = new RewritePipeline.Context(
-                invokeRegistry, conversionRegistry, aliasMap, shapeRegistry, wfFetchUrl);
+                invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
+                fulltextRegistry, documentRegistry, federationRegistry, wfFetchUrl);
         // Install on the ARQ global context; QueryExecution copies it into
         // the per-query context, so the engine factory's accept() sees
         // PIPELINE_SYMBOL and modifyOp writes ALIAS_STATE_SYMBOL back onto
