@@ -132,7 +132,8 @@ public final class RewritePipeline {
         //    in (wf-document-v1.md §05). Runs after Alias so the SERVICE
         //    URI is already canonical, and before Fulltext/Shape so the
         //    subsequent passes see the substituted invoke IRI as opaque.
-        cursor = WfSearchRewrite.rewrite(cursor, ctx.documentRegistry, ctx.invokeRegistry);
+        cursor = WfSearchRewrite.rewrite(cursor, ctx.documentRegistry,
+                ctx.fulltextRegistry, ctx.invokeRegistry);
         // 5. Fulltext filter-fold — lift FILTER over indexed predicates
         //    into a SERVICE <wf-invoke:> dispatch (memo §06). Runs after
         //    Alias so we see canonical predicate IRIs, and before Shape so

@@ -74,33 +74,60 @@ public final class WfSearchRewrite {
     private static final int DEFAULT_LIMIT = 20;
 
     private final DocumentRegistry registry;
+    private final FulltextRegistry fulltextRegistry;
     private final InvokeRegistry invokes;
 
     public WfSearchRewrite(final DocumentRegistry registry, final InvokeRegistry invokes) {
+        this(registry, null, invokes);
+    }
+
+    public WfSearchRewrite(final DocumentRegistry registry,
+                           final FulltextRegistry fulltextRegistry,
+                           final InvokeRegistry invokes) {
         this.registry = registry;
+        this.fulltextRegistry = fulltextRegistry;
         this.invokes = invokes;
     }
 
     /**
      * Static entry point for the pipeline. Returns the input unchanged
-     * when the document registry is empty or absent.
+     * when both registries are empty or absent.
+     *
+     * <p>DocumentRegistry is the primary resolver (wf_document guest ABI).
+     * FulltextRegistry is consulted as a fallback so a
+     * {@code wf-search:<name>} URL whose target lives only in the
+     * fulltext registry (e.g. a federation source aliased through
+     * {@code --fulltext-config}) still folds. Fallback path emits a
+     * wf_fulltext-shaped InvokeSpec —
+     * {@code [backend_endpoint, index, query, opts_json]} — matching
+     * {@link FulltextRewrite}. Closes the
+     * {@code federation_wf_search} conformance case.
      */
     public static Op rewrite(final Op op,
                              final DocumentRegistry registry,
                              final InvokeRegistry invokes) {
+        return rewrite(op, registry, null, invokes);
+    }
+
+    public static Op rewrite(final Op op,
+                             final DocumentRegistry registry,
+                             final FulltextRegistry fulltextRegistry,
+                             final InvokeRegistry invokes) {
         if (op == null) return null;
-        if (registry == null || registry.isEmpty() || invokes == null) {
-            return op;
-        }
-        return new WfSearchRewrite(registry, invokes).rewrite(op);
+        if (invokes == null) return op;
+        final boolean bothEmpty = (registry == null || registry.isEmpty())
+                && (fulltextRegistry == null || fulltextRegistry.isEmpty());
+        if (bothEmpty) return op;
+        return new WfSearchRewrite(registry, fulltextRegistry, invokes).rewrite(op);
     }
 
     /** Instance entry point. */
     public Op rewrite(final Op op) {
         if (op == null) return null;
-        if (registry == null || registry.isEmpty() || invokes == null) {
-            return op;
-        }
+        if (invokes == null) return op;
+        final boolean bothEmpty = (registry == null || registry.isEmpty())
+                && (fulltextRegistry == null || fulltextRegistry.isEmpty());
+        if (bothEmpty) return op;
         return Transformer.transform(new SearchTransform(), op);
     }
 
@@ -125,23 +152,36 @@ public final class WfSearchRewrite {
                 return super.transform(opService, subOp);
             }
 
-            final DocumentRegistry.DocumentIndex entry = registry.byName(parsed.name);
-            if (entry == null) {
-                // Unregistered name -> pass through; execution-time
-                // SERVICE dispatch will raise a proper "no such handler"
-                // error rather than us silently substituting a bogus IRI.
-                return super.transform(opService, subOp);
-            }
-
             final String query = findQueryLiteral(subOp);
             if (query == null) {
                 // No wf:query triple in the body -> nothing to invoke on.
                 return super.transform(opService, subOp);
             }
 
-            final String iri = allocateInvoke(entry, parsed, query);
-            final Node newSvc = NodeFactory.createURI(iri);
-            return new OpService(newSvc, subOp, opService.getSilent());
+            // Primary path: DocumentRegistry (wf_document guest ABI).
+            final DocumentRegistry.DocumentIndex docEntry =
+                    registry == null ? null : registry.byName(parsed.name);
+            if (docEntry != null) {
+                final String iri = allocateDocumentInvoke(docEntry, parsed, query);
+                final Node newSvc = NodeFactory.createURI(iri);
+                return new OpService(newSvc, subOp, opService.getSilent());
+            }
+
+            // Fallback: FulltextRegistry (wf_fulltext guest ABI). Enables
+            // federation sources whose dispatch info lives in
+            // --fulltext-config.
+            final FulltextRegistry.FulltextIndex ftEntry =
+                    fulltextRegistry == null ? null : fulltextRegistry.byName(parsed.name);
+            if (ftEntry != null) {
+                final String iri = allocateFulltextInvoke(ftEntry, parsed, query);
+                final Node newSvc = NodeFactory.createURI(iri);
+                return new OpService(newSvc, subOp, opService.getSilent());
+            }
+
+            // Unregistered on both -> pass through. Execution-time
+            // SERVICE dispatch will raise a proper "no such handler"
+            // error rather than us silently substituting a bogus IRI.
+            return super.transform(opService, subOp);
         }
     }
 
@@ -311,9 +351,9 @@ public final class WfSearchRewrite {
     // Opts JSON + InvokeSpec allocation
     // ---------------------------------------------------------------------
 
-    private String allocateInvoke(final DocumentRegistry.DocumentIndex entry,
-                                  final ParsedUrl parsed,
-                                  final String query) {
+    private String allocateDocumentInvoke(final DocumentRegistry.DocumentIndex entry,
+                                          final ParsedUrl parsed,
+                                          final String query) {
         final int limit = resolveLimit(parsed);
         final String optsJson = buildOptsJson(parsed, limit);
 
@@ -328,6 +368,104 @@ public final class WfSearchRewrite {
         final long id = invokes.insert(
                 new InvokeRegistry.InvokeSpec(entry.guestUrl(), args, "search"));
         return InvokeRegistry.iriFor(id);
+    }
+
+    /**
+     * FulltextRegistry-backed fallback allocator. Emits an InvokeSpec
+     * against the wf_fulltext guest ABI:
+     * <ol start="0">
+     *   <li>{@code backend_endpoint} — HTTP endpoint (Manticore etc.)
+     *       from the entry's {@code opts_json.backend_endpoint}; falls
+     *       back to {@code http://localhost:9308} when unset.</li>
+     *   <li>{@code index} — backend-side name from
+     *       {@code opts_json.index}; falls back to the entry's
+     *       {@code name}.</li>
+     *   <li>{@code query} — search string from the SERVICE body.</li>
+     *   <li>{@code opts_json} — URL opts baked in.</li>
+     * </ol>
+     */
+    private String allocateFulltextInvoke(final FulltextRegistry.FulltextIndex entry,
+                                          final ParsedUrl parsed,
+                                          final String query) {
+        // wf_fulltext guest's WIT `query-opts` record has two REQUIRED
+        // fields: `fields: list<string>` and `highlight: bool`. Emit
+        // both as defaults; without them the substrate's typed-arg
+        // marshaller fails with "record missing required field
+        // `fields`".
+        final String optsJson = buildFulltextOptsJson(parsed);
+        final String[] be = splitFulltextOpts(entry);
+        final String backendEndpoint = be[0];
+        final String indexName = be[1];
+
+        final List<Node> args = new ArrayList<>(4);
+        args.add(NodeFactory.createLiteralString(backendEndpoint));
+        args.add(NodeFactory.createLiteralString(indexName));
+        args.add(NodeFactory.createLiteralString(query));
+        args.add(NodeFactory.createLiteralString(optsJson));
+
+        final long id = invokes.insert(
+                new InvokeRegistry.InvokeSpec(entry.backendUrl(), args, "search"));
+        return InvokeRegistry.iriFor(id);
+    }
+
+    /**
+     * Build JSON matching the wf_fulltext guest's {@code query-opts}
+     * WIT record. {@code fields} and {@code highlight} are required.
+     */
+    private static String buildFulltextOptsJson(final ParsedUrl parsed) {
+        final StringBuilder sb = new StringBuilder();
+        sb.append('{');
+        sb.append("\"fields\":[]");
+        sb.append(",\"highlight\":");
+        final String hl = parsed.opts.get("highlight");
+        sb.append("true".equalsIgnoreCase(hl) || "1".equals(hl) ? "true" : "false");
+        // Optional fields — propagate whatever the caller supplied.
+        appendIntIfPresent(sb, parsed.opts.get("limit"), "limit");
+        appendIntIfPresent(sb, parsed.opts.get("offset"), "offset");
+        appendStrIfPresent(sb, parsed.opts.get("lang"), "lang");
+        appendStrIfPresent(sb, parsed.opts.get("filter"), "filter");
+        appendStrIfPresent(sb, parsed.opts.get("after"), "after");
+        appendStrIfPresent(sb, parsed.opts.get("before"), "before");
+        if (parsed.atTime != null) {
+            sb.append(",\"at_time\":\"").append(jsonEscape(parsed.atTime)).append('"');
+        }
+        if (parsed.atRev != null) {
+            sb.append(",\"at_rev\":").append(parsed.atRev.longValue());
+        }
+        sb.append('}');
+        return sb.toString();
+    }
+
+    /**
+     * Peel {@code backend_endpoint} and {@code index} from the entry's
+     * {@code opts_json}. Returns {@code [backend_endpoint, index]}.
+     */
+    private static String[] splitFulltextOpts(final FulltextRegistry.FulltextIndex entry) {
+        final String opts = entry.optsJson();
+        String backendEndpoint = "http://localhost:9308";
+        String index = entry.name();
+        try {
+            final org.apache.jena.atlas.json.JsonValue jv =
+                    org.apache.jena.atlas.json.JSON.parseAny(opts);
+            if (jv != null && jv.isObject()) {
+                final org.apache.jena.atlas.json.JsonObject obj = jv.getAsObject();
+                if (obj.hasKey("backend_endpoint") && obj.get("backend_endpoint").isString()) {
+                    backendEndpoint = obj.get("backend_endpoint").getAsString().value();
+                } else if (obj.hasKey("backend_url") && obj.get("backend_url").isString()) {
+                    backendEndpoint = obj.get("backend_url").getAsString().value();
+                }
+                if (obj.hasKey("index") && obj.get("index").isString()) {
+                    index = obj.get("index").getAsString().value();
+                }
+            }
+        } catch (RuntimeException ignored) {
+            // Malformed opts_json — fall back to defaults. Registry
+            // load-time validation already normalized this to a valid
+            // JSON string; a runtime parse failure means someone patched
+            // the entry out-of-band, and defaults are safer than crashing
+            // the rewrite pass.
+        }
+        return new String[] {backendEndpoint, index};
     }
 
     private static int resolveLimit(final ParsedUrl parsed) {
