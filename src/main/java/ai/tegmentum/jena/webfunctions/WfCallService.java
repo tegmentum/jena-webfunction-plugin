@@ -96,10 +96,33 @@ public final class WfCallService implements ChainingServiceExecutor {
         if (lower.startsWith(InvokeRegistry.WF_INVOKE_SCHEME)) {
             return false;
         }
-        return lower.startsWith("file:")
-                || lower.startsWith("http:")
-                || lower.startsWith("https:")
-                || lower.startsWith("ipfs:");
+        // For http(s) URLs, require an explicit `.wasm` path suffix. Without
+        // this guard, the wf_federation rewrite pass — which emits
+        // `SERVICE <http://.../query>` clauses whose URLs point at plain
+        // SPARQL endpoints — would collide with this handler: WfCallService
+        // would HTTP-GET the SPARQL endpoint, receive SPARQL Results JSON,
+        // and hand that to wasmtime4j, which of course fails to compile it
+        // as a WASM component. See wf-conformance `federation_sparql_only`
+        // for the regression scenario. `file:` and `ipfs:` never carry
+        // SPARQL federation traffic, so their existing prefix match stays.
+        if (lower.startsWith("http:") || lower.startsWith("https:")) {
+            return hasWasmSuffix(lower);
+        }
+        return lower.startsWith("file:") || lower.startsWith("ipfs:");
+    }
+
+    /**
+     * Return true when {@code lower} (already lowercased) ends with
+     * {@code .wasm}, optionally followed by a URL query string or fragment.
+     * Package-private for the tests.
+     */
+    static boolean hasWasmSuffix(final String lower) {
+        int end = lower.length();
+        final int q = lower.indexOf('?');
+        if (q >= 0) end = Math.min(end, q);
+        final int f = lower.indexOf('#');
+        if (f >= 0) end = Math.min(end, f);
+        return lower.regionMatches(true, end - 5, ".wasm", 0, 5);
     }
 
     /**

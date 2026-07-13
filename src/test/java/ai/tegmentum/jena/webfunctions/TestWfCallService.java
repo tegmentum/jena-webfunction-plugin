@@ -94,4 +94,31 @@ public class TestWfCallService {
             assertThat(rs.hasNext()).isFalse();
         }
     }
+
+    /**
+     * Regression: WfCallService must NOT claim `SERVICE <http://.../query>`
+     * URLs (SPARQL endpoints emitted by the wf_federation rewrite pass).
+     * Before this check landed, WfCallService accepted every http(s) URL
+     * as a wasm-component URL, HTTP-GET'd the SPARQL endpoint, and handed
+     * the SPARQL Results JSON to wasmtime4j as component bytes. Under
+     * SILENT semantics the whole federated round-trip silently no-op'd
+     * with empty bindings — the wf-conformance `federation_sparql_only`
+     * case exercises the end-to-end scenario; this test locks the
+     * URL-suffix guard on its own so unit tests catch a regression.
+     */
+    @Test
+    public void wasmSuffixGuardRejectsSparqlEndpointUrls() {
+        // Positive cases — wasm URLs the executor MUST claim.
+        assertThat(WfCallService.hasWasmSuffix("file:///tmp/foo.wasm")).isTrue();
+        assertThat(WfCallService.hasWasmSuffix("http://cdn.example/x.wasm")).isTrue();
+        assertThat(WfCallService.hasWasmSuffix("https://cdn.example/x.wasm?v=1")).isTrue();
+        assertThat(WfCallService.hasWasmSuffix("https://cdn.example/x.wasm#frag")).isTrue();
+        assertThat(WfCallService.hasWasmSuffix("ipfs://qmhash/x.wasm")).isTrue();
+
+        // Negative cases — SPARQL endpoints the executor MUST delegate.
+        assertThat(WfCallService.hasWasmSuffix("http://127.0.0.1:8080/query")).isFalse();
+        assertThat(WfCallService.hasWasmSuffix("https://public.example/sparql")).isFalse();
+        assertThat(WfCallService.hasWasmSuffix("http://x/")).isFalse();
+        assertThat(WfCallService.hasWasmSuffix("http:")).isFalse();
+    }
 }
