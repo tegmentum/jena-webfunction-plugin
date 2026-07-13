@@ -1,12 +1,18 @@
 package ai.tegmentum.jena.webfunctions;
 
 import ai.tegmentum.wasmtime4j.wit.WitEnum;
+import ai.tegmentum.wasmtime4j.wit.WitFloat32;
 import ai.tegmentum.wasmtime4j.wit.WitFloat64;
 import ai.tegmentum.wasmtime4j.wit.WitList;
 import ai.tegmentum.wasmtime4j.wit.WitOption;
 import ai.tegmentum.wasmtime4j.wit.WitRecord;
+import ai.tegmentum.wasmtime4j.wit.WitS32;
+import ai.tegmentum.wasmtime4j.wit.WitS64;
 import ai.tegmentum.wasmtime4j.wit.WitString;
+import ai.tegmentum.wasmtime4j.wit.WitTuple;
 import ai.tegmentum.wasmtime4j.wit.WitType;
+import ai.tegmentum.wasmtime4j.wit.WitU32;
+import ai.tegmentum.wasmtime4j.wit.WitU64;
 import ai.tegmentum.wasmtime4j.wit.WitValue;
 import ai.tegmentum.wasmtime4j.wit.WitVariant;
 
@@ -20,6 +26,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 
 /**
  * Marshalling between Jena {@link Node} and the WIT value model declared in
@@ -169,8 +176,18 @@ public final class WitValueMarshaller {
     /**
      * Unmarshal a WIT {@code binding-sets} value into a list of Rows.
      * Every row uses the same {@code vars} list order.
+     *
+     * <p>Domain guests (wf_fulltext, wf_document) declare their own WIT
+     * world and return {@code list<hit>} rather than the substrate's
+     * {@code binding-sets { vars, rows }} record. When the guest hands
+     * us a WitList we coerce hit-records into binding-sets at decode
+     * time; see {@link #hitListToRows(WitList)} for the projection
+     * rules.
      */
     public static List<Row> bindingSetsFromWit(final WitValue witValue) {
+        if (witValue instanceof WitList) {
+            return hitListToRows((WitList) witValue);
+        }
         final WitRecord record = (WitRecord) witValue;
         final List<String> vars = new ArrayList<>();
         for (WitValue v : ((WitList) record.getField("vars")).getElements()) {
@@ -189,5 +206,163 @@ public final class WitValueMarshaller {
             rows.add(new Row(vars, byName));
         }
         return rows;
+    }
+
+    /**
+     * Coerce a {@code list<hit>} value into binding-sets Rows.
+     *
+     * <p>Projection rules mirror
+     * {@code oxigraph-wf/src/wf_call.rs::decode_hit_list}:
+     * <ul>
+     *   <li>Each hit becomes one row.</li>
+     *   <li>Top-level scalar fields (doc, score, snippet, lang, ...)
+     *       become columns of the same name.</li>
+     *   <li>{@code hit.fields[k]} tuples become their own columns.</li>
+     *   <li>URI-shaped strings project as URI nodes; otherwise as
+     *       {@code xsd:string} literals.</li>
+     *   <li>The {@code doc} column prefers a URI-shaped
+     *       {@code subject} sidecar over {@code hit.doc} when the
+     *       top-level value isn't URI-shaped (Manticore's numeric
+     *       {@code _id} lands in {@code hit.doc}; the semantic doc URI
+     *       lives in {@code _source.subject}).</li>
+     *   <li>Option-typed fields drop when None.</li>
+     *   <li>Numeric score projects as {@code xsd:double}.</li>
+     * </ul>
+     * See wf-conformance/docs/design/wf-fulltext.md §11 for the guest
+     * hit shape this decoder mirrors.
+     */
+    private static List<Row> hitListToRows(final WitList hits) {
+        final TreeSet<String> varSet = new TreeSet<>();
+        final List<LinkedHashMap<String, Node>> perRow = new ArrayList<>();
+
+        for (WitValue hitVal : hits.getElements()) {
+            if (!(hitVal instanceof WitRecord)) continue;
+            final WitRecord hit = (WitRecord) hitVal;
+            final Map<String, WitValue> fields = hit.getFields();
+
+            final List<Map.Entry<String, String>> innerFields = new ArrayList<>();
+            if (fields.get("fields") instanceof WitList) {
+                for (WitValue item : ((WitList) fields.get("fields")).getElements()) {
+                    final Map.Entry<String, String> pair = stringTuple(item);
+                    if (pair != null) innerFields.add(pair);
+                }
+            }
+
+            final LinkedHashMap<String, Node> row = new LinkedHashMap<>();
+
+            boolean docUsedSubject = false;
+            if (fields.get("doc") instanceof WitString) {
+                final String docStr = ((WitString) fields.get("doc")).getValue();
+                final String[] picked = pickDoc(docStr, innerFields);
+                docUsedSubject = "1".equals(picked[1]);
+                row.put("doc", scalarToNode(picked[0]));
+                varSet.add("doc");
+            }
+
+            final Double score = numericField(fields.get("score"));
+            if (score != null) {
+                row.put("score", NodeFactory.createLiteralDT(
+                        score.toString(), XSDDatatype.XSDdouble));
+                varSet.add("score");
+            }
+
+            for (Map.Entry<String, WitValue> e : fields.entrySet()) {
+                if (e.getKey().equals("doc")
+                        || e.getKey().equals("score")
+                        || e.getKey().equals("fields")) continue;
+                final String s = flattenOptionalString(e.getValue());
+                if (s == null) continue;
+                row.put(e.getKey(), scalarToNode(s));
+                varSet.add(e.getKey());
+            }
+
+            for (Map.Entry<String, String> f : innerFields) {
+                if (f.getKey().equals("subject") && docUsedSubject) continue;
+                row.put(f.getKey(), scalarToNode(f.getValue()));
+                varSet.add(f.getKey());
+            }
+
+            perRow.add(row);
+        }
+
+        final List<String> vars = new ArrayList<>(varSet);
+        final List<Row> rows = new ArrayList<>(perRow.size());
+        for (LinkedHashMap<String, Node> src : perRow) {
+            final List<Node> byIndex = new ArrayList<>(
+                    java.util.Collections.nCopies(vars.size(), null));
+            for (Map.Entry<String, Node> e : src.entrySet()) {
+                final int idx = vars.indexOf(e.getKey());
+                if (idx >= 0) byIndex.set(idx, e.getValue());
+            }
+            rows.add(new Row(vars, byIndex));
+        }
+        return rows;
+    }
+
+    /**
+     * Prefer a URI-shaped {@code subject} from {@code hit.fields} over
+     * a non-URI {@code hit.doc}. Returns {@code {chosen, "1"}} when the
+     * subject sidecar wins, {@code {top, "0"}} otherwise. Encoding the
+     * boolean as a string keeps the method signature array-shaped so
+     * the caller doesn't need a two-field struct.
+     */
+    private static String[] pickDoc(
+            final String topDoc,
+            final List<Map.Entry<String, String>> innerFields) {
+        if (isUriShaped(topDoc)) return new String[] { topDoc, "0" };
+        for (Map.Entry<String, String> e : innerFields) {
+            if (e.getKey().equals("subject") && isUriShaped(e.getValue())) {
+                return new String[] { e.getValue(), "1" };
+            }
+        }
+        return new String[] { topDoc, "0" };
+    }
+
+    private static boolean isUriShaped(final String s) {
+        return s.startsWith("http://")
+                || s.startsWith("https://")
+                || s.startsWith("urn:")
+                || s.startsWith("file://")
+                || s.startsWith("ipfs://")
+                || s.startsWith("ipns://")
+                || s.startsWith("sirix://");
+    }
+
+    private static Node scalarToNode(final String s) {
+        if (isUriShaped(s)) return NodeFactory.createURI(s);
+        return NodeFactory.createLiteralDT(s, XSDDatatype.XSDstring);
+    }
+
+    private static Map.Entry<String, String> stringTuple(final WitValue v) {
+        if (!(v instanceof WitTuple)) return null;
+        final List<WitValue> elems = ((WitTuple) v).getElements();
+        if (elems.size() != 2) return null;
+        if (!(elems.get(0) instanceof WitString)) return null;
+        if (!(elems.get(1) instanceof WitString)) return null;
+        return new java.util.AbstractMap.SimpleEntry<>(
+                ((WitString) elems.get(0)).getValue(),
+                ((WitString) elems.get(1)).getValue());
+    }
+
+    private static Double numericField(final WitValue v) {
+        if (v instanceof WitFloat64) return ((WitFloat64) v).getValue();
+        if (v instanceof WitFloat32) return (double) ((WitFloat32) v).getValue();
+        if (v instanceof WitS64) return (double) ((WitS64) v).getValue();
+        if (v instanceof WitU64) return (double) ((WitU64) v).getValue();
+        if (v instanceof WitS32) return (double) ((WitS32) v).getValue();
+        if (v instanceof WitU32) return (double) ((WitU32) v).getValue();
+        return null;
+    }
+
+    private static String flattenOptionalString(final WitValue v) {
+        if (v instanceof WitString) return ((WitString) v).getValue();
+        if (v instanceof WitOption) {
+            final Optional<WitValue> inner = ((WitOption) v).getValue();
+            if (inner.isPresent() && inner.get() instanceof WitString) {
+                return ((WitString) inner.get()).getValue();
+            }
+            return null;
+        }
+        return null;
     }
 }
