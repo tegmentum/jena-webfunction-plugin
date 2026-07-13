@@ -180,6 +180,45 @@ public final class JenaWasmInstance implements Closeable {
             linker.addWitHostFunction(
                 "stardog:webfunction/host@0.5.0#sink-close",
                 HostCallbacks.sinkClose());
+            // v0.6.0 additive imports — execute-query-with-bindings unlocks
+            // wf_pipeline v3's typed binding-set propagation: a step's row
+            // grid is handed to the next SPARQL step as a substrate-native
+            // VALUES splice, not stringified into VALUES text. Additive
+            // registration: guests targeting v0.3.x .. v0.5.x continue to
+            // link against their own interface instance above.
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#execute-query",
+                HostCallbacks.executeQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#execute-query-with-bindings",
+                HostCallbacks.executeQueryWithBindings());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#callback-depth",
+                HostCallbacks.callbackDepth());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#execute-update",
+                HostCallbacks.executeUpdateV05());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#prepare-query",
+                HostCallbacks.prepareQuery());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#run-prepared",
+                HostCallbacks.runPrepared());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#follow-predicate",
+                HostCallbacks.followPredicate());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#invoke-wasm",
+                HostCallbacks.invokeWasm());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#sink-open",
+                HostCallbacks.sinkOpen());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#sink-execute",
+                HostCallbacks.sinkExecute());
+            linker.addWitHostFunction(
+                "stardog:webfunction/host@0.6.0#sink-close",
+                HostCallbacks.sinkClose());
         }
         // wf:fulltext/host@0.1.0 — one import, `http-post-json`. The
         // wf_fulltext guest declares its own WIT world (versioned under

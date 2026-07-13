@@ -45,6 +45,13 @@ public final class CallbackContext {
     private final java.util.Map<Integer, Query> prepared = new java.util.HashMap<>();
     private int nextHandle = 1;
 
+    // v0.5 sink handles. Vec-backed so the handle IS the index; nulling a
+    // slot survives sink-close without reshuffling.  Handles are valid only
+    // for the lifetime of the outer wf:call frame that opened them — the
+    // frame closes any leftover sinks when it unbinds via
+    // {@link #unbindIfOutermost}.
+    private final java.util.List<Sink> sinks = new java.util.ArrayList<>();
+
     private CallbackContext(final DatasetGraph dataset, final int maxDepth, final int maxRows) {
         this.dataset = dataset;
         this.maxDepth = maxDepth;
@@ -74,9 +81,22 @@ public final class CallbackContext {
     /**
      * Unbind only when the ctx passed is the outermost binding (its depth is 0
      * and it matches the currently bound one). Nested calls don't unbind.
+     *
+     * <p>Closes any leftover v0.5 sinks the guest didn't explicitly close.
+     * The WIT contract says sink handles are only valid within the frame
+     * that opened them — this is where the frame ends.
      */
     public static void unbindIfOutermost(final CallbackContext ctx) {
         if (ctx.depth == 0 && CURRENT.get() == ctx) {
+            for (Sink s : ctx.sinks) {
+                if (s == null) continue;
+                try {
+                    s.close();
+                } catch (Exception ignored) {
+                    // Best-effort close on frame exit.
+                }
+            }
+            ctx.sinks.clear();
             CURRENT.remove();
         }
     }
@@ -129,6 +149,142 @@ public final class CallbackContext {
                 .build()) {
             return ResultSetFactory.copyResults(qe.execSelect());
         }
+    }
+
+    /**
+     * v0.6 execute-query-with-bindings: execute a SPARQL SELECT with a full
+     * pre-seed binding matrix (vars + rows) rather than a single row of
+     * scalar bindings. Semantics mirror Oxigraph's
+     * {@code run_query_with_seed} — the seed is spliced under the outermost
+     * projection as a VALUES join, so it composes with any WHERE-only
+     * variables the outer SELECT does not project.
+     *
+     * <p>Missing cells in a row become Jena UNDEF (null in the Binding),
+     * matching SPARQL 1.1 VALUES semantics. The seed variables are combined
+     * with the query's projected variables in the result-set vars list.
+     */
+    public ResultSet executeSelectWithBindings(
+            final String sparql,
+            final java.util.List<org.apache.jena.sparql.core.Var> seedVars,
+            final java.util.List<org.apache.jena.sparql.engine.binding.Binding> seedRows) {
+        final Query q = QueryFactory.create(sparql);
+        if (seedVars.isEmpty() || seedRows.isEmpty()) {
+            // No seed → identical semantics to executeSelect with no bindings.
+            try (QueryExecution qe = QueryExecutionDatasetBuilder.create()
+                    .query(q)
+                    .dataset(org.apache.jena.query.DatasetFactory.wrap(dataset))
+                    .build()) {
+                return ResultSetFactory.copyResults(qe.execSelect());
+            }
+        }
+        final org.apache.jena.sparql.algebra.Op op = org.apache.jena.sparql.algebra.Algebra.compile(q);
+        final org.apache.jena.sparql.algebra.table.TableData table =
+                new org.apache.jena.sparql.algebra.table.TableData(seedVars, seedRows);
+        final org.apache.jena.sparql.algebra.op.OpTable valuesOp =
+                org.apache.jena.sparql.algebra.op.OpTable.create(table);
+        final org.apache.jena.sparql.algebra.Op transformed = spliceValuesUnderProjection(op, valuesOp);
+
+        // Vars are the union of the query's project vars plus any seed vars
+        // (in that order, dedup'd) so seed-only columns still show up in the
+        // returned binding-sets — otherwise a seed-only var would disappear
+        // even though the join grabbed it from the VALUES row.
+        final java.util.List<String> resultVars = new java.util.ArrayList<>(q.getResultVars());
+        for (org.apache.jena.sparql.core.Var v : seedVars) {
+            if (!resultVars.contains(v.getVarName())) {
+                resultVars.add(v.getVarName());
+            }
+        }
+        final org.apache.jena.sparql.engine.QueryIterator qIter =
+                org.apache.jena.sparql.algebra.Algebra.exec(transformed, dataset);
+        try {
+            // Wrap the algebra iterator in a ResultSet keyed by the union var
+            // list, then copy into memory so the caller can iterate freely
+            // after we close the underlying algebra iterator.
+            final ResultSet rss = org.apache.jena.sparql.engine.ResultSetStream.create(
+                    resultVars,
+                    org.apache.jena.rdf.model.ModelFactory.createDefaultModel(),
+                    qIter);
+            return ResultSetFactory.copyResults(rss);
+        } finally {
+            qIter.close();
+        }
+    }
+
+    /**
+     * Walk down through Project/Distinct/Reduced/OrderBy/Slice/Group/Filter/
+     * Extend wrappers until we reach the scan/join pattern, then wrap it in
+     * {@code Join(values, inner)}. Same splice path Oxigraph uses so seed
+     * columns compose with WHERE-only variables, not just the outer SELECT's
+     * projection.
+     */
+    private static org.apache.jena.sparql.algebra.Op spliceValuesUnderProjection(
+            final org.apache.jena.sparql.algebra.Op op,
+            final org.apache.jena.sparql.algebra.Op values) {
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpProject p) {
+            return new org.apache.jena.sparql.algebra.op.OpProject(
+                    spliceValuesUnderProjection(p.getSubOp(), values), p.getVars());
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpDistinct d) {
+            return new org.apache.jena.sparql.algebra.op.OpDistinct(
+                    spliceValuesUnderProjection(d.getSubOp(), values));
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpReduced r) {
+            return org.apache.jena.sparql.algebra.op.OpReduced.create(
+                    spliceValuesUnderProjection(r.getSubOp(), values));
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpOrder o) {
+            return new org.apache.jena.sparql.algebra.op.OpOrder(
+                    spliceValuesUnderProjection(o.getSubOp(), values), o.getConditions());
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpSlice s) {
+            return new org.apache.jena.sparql.algebra.op.OpSlice(
+                    spliceValuesUnderProjection(s.getSubOp(), values),
+                    s.getStart(), s.getLength());
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpGroup g) {
+            return new org.apache.jena.sparql.algebra.op.OpGroup(
+                    spliceValuesUnderProjection(g.getSubOp(), values),
+                    g.getGroupVars(), g.getAggregators());
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpFilter f) {
+            return org.apache.jena.sparql.algebra.op.OpFilter.filterBy(
+                    f.getExprs(),
+                    spliceValuesUnderProjection(f.getSubOp(), values));
+        }
+        if (op instanceof org.apache.jena.sparql.algebra.op.OpExtend e) {
+            return org.apache.jena.sparql.algebra.op.OpExtend.create(
+                    spliceValuesUnderProjection(e.getSubOp(), values),
+                    e.getVarExprList());
+        }
+        return org.apache.jena.sparql.algebra.op.OpJoin.create(values, op);
+    }
+
+    // ---- v0.5 sink handle table -------------------------------------------
+
+    /** v0.5 sink-open: install {@code s} in the slot table, return its index. */
+    public int addSink(final Sink s) {
+        sinks.add(s);
+        return sinks.size() - 1;
+    }
+
+    /** v0.5 sink-execute: look up an open sink by handle, or null if closed/stale. */
+    public Sink getSink(final int handle) {
+        if (handle < 0 || handle >= sinks.size()) return null;
+        return sinks.get(handle);
+    }
+
+    /**
+     * v0.5 sink-close: null out the slot so future sink-execute against the
+     * same handle returns a stale-handle error. Returns true iff the slot
+     * was populated.
+     */
+    public boolean closeSink(final int handle) throws Exception {
+        if (handle < 0 || handle >= sinks.size()) return false;
+        final Sink s = sinks.get(handle);
+        if (s == null) return false;
+        sinks.set(handle, null);
+        s.close();
+        return true;
     }
 
     /** v0.3.2 prepare-query — parse once, return a handle. */

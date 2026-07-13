@@ -36,6 +36,76 @@ public final class HostCallbacks {
 
     private HostCallbacks() {}
 
+    /**
+     * v0.6 {@code execute-query-with-bindings: func(query: string,
+     *  seed: binding-sets, max-rows: option<u32>) -> result<binding-sets, string>}.
+     *
+     * <p>Unlike {@link #executeQuery} — which pre-seeds a single row's worth
+     * of scalar bindings — this accepts a full {@code binding-sets} record
+     * (vars + rows) and splices it under the query's outermost projection as
+     * a VALUES join. Mirrors Oxigraph's {@code run_query_with_seed} and gives
+     * wf_pipeline v3's typed binding-set propagation a substrate-native path
+     * that doesn't route through VALUES-text interpolation.
+     *
+     * <p>Missing cells become Jena UNDEF (null in the {@link
+     * org.apache.jena.sparql.engine.binding.Binding}), matching SPARQL 1.1
+     * VALUES semantics.
+     */
+    public static WitHostFunction executeQueryWithBindings() {
+        return args -> {
+            if (!WebFunctionConfig.callbackEnabled()) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback disabled by webfunctions.callback.enabled=false")) };
+            }
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback: no context bound — WfCall must bind CallbackContext "
+                    + "at the top of exec()")) };
+            }
+            try {
+                final String sparql = ((ComponentVal) args[0]).asString();
+                final ComponentVal seedVal = (ComponentVal) args[1];
+                final Map<String, ComponentVal> seedFields = seedVal.asRecord();
+                final ComponentVal varsField = seedFields.get("vars");
+                final ComponentVal rowsField = seedFields.get("rows");
+                if (varsField == null || rowsField == null) {
+                    return new Object[] { ComponentVal.err(ComponentVal.string(
+                        "wf execute-query-with-bindings: seed missing vars/rows field")) };
+                }
+                final List<org.apache.jena.sparql.core.Var> seedVars = new ArrayList<>();
+                for (ComponentVal v : varsField.asList()) {
+                    seedVars.add(org.apache.jena.sparql.core.Var.alloc(v.asString()));
+                }
+                final List<org.apache.jena.sparql.engine.binding.Binding> seedRows =
+                        new ArrayList<>();
+                for (ComponentVal rowVal : rowsField.asList()) {
+                    final org.apache.jena.sparql.engine.binding.BindingBuilder bb =
+                            org.apache.jena.sparql.engine.binding.BindingFactory.builder();
+                    for (ComponentVal bindingVal : rowVal.asList()) {
+                        final Map<String, ComponentVal> bf = bindingVal.asRecord();
+                        final String name = bf.get("name").asString();
+                        final Node n = decodeNode(bf.get("value"));
+                        bb.add(org.apache.jena.sparql.core.Var.alloc(name), n);
+                    }
+                    seedRows.add(bb.build());
+                }
+                final int rowCap = decodeOptionalU32((ComponentVal) args[2]).orElseGet(ctx::maxRows);
+
+                ctx.enter();
+                try {
+                    final ResultSet rs = ctx.executeSelectWithBindings(sparql, seedVars, seedRows);
+                    return new Object[] { ComponentVal.ok(encodeBindingSets(rs, rowCap)) };
+                } finally {
+                    ctx.exit();
+                }
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
     /** {@code execute-query: func(sparql: string, bindings: list<binding>,
      *  max-rows: option<u32>) -> result<binding-sets, string>}. */
     public static WitHostFunction executeQuery() {
