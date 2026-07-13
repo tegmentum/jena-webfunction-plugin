@@ -139,7 +139,16 @@ public final class RewritePipeline {
         //    Alias so we see canonical predicate IRIs, and before Shape so
         //    shape-covered BGPs still take precedence for BGP rewriting.
         cursor = FulltextRewrite.rewrite(cursor, ctx.fulltextRegistry, ctx.invokeRegistry);
-        // 6. Shape rewrite — cover BGPs with SERVICE <wf:call>.
+        // 6a. wf-fetch URL sugar — fold SERVICE <wf-fetch:name> emitted
+        //     by WfFederationRewrite into the SERVICE <wf:call> envelope
+        //     shape_rewrite emits for direct-BGP shape hits. Bridges
+        //     FederationRegistry (names the source, confirms WF_FETCH
+        //     type) to ShapeRegistry (supplies the wire contract) via
+        //     same-name lookup. Empty registries or null wfFetchUrl →
+        //     short-circuit.
+        cursor = WfFetchRewrite.rewrite(cursor, ctx.federationRegistry,
+                ctx.shapeRegistry, ctx.wfFetchUrl);
+        // 6b. Shape rewrite — cover BGPs with SERVICE <wf:call>.
         cursor = ShapeRewrite.rewrite(cursor, ctx.shapeRegistry, ctx.wfFetchUrl);
         return new Result(cursor, aliasRes.state);
     }
