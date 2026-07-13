@@ -511,18 +511,40 @@ public final class JenaWasmInstance implements Closeable {
                 return ai.tegmentum.wasmtime4j.wit.WitList.of(out);
             }
             case RECORD: {
-                // Accommodate a bare-number lexical form (e.g.
+                // Accommodate a bare-scalar lexical form (e.g.
                 // `wf:partial(..., "waterproof", 10)` where the guest's
-                // 4th param is a query-opts record with a `limit`
-                // field). Wrap the scalar as `{"limit": N}` and continue.
+                // 4th param is a query-opts record with `limit: int`,
+                // `fields: list<string>`, and `highlight: bool`).
+                // Policy mirrors the Oxigraph dispatcher
+                // (oxigraph-wf/src/wf_call.rs::json_to_val):
+                //
+                //   * If exactly one non-optional field's type accepts
+                //     the bare scalar's shape (int → int, bool → bool,
+                //     string → string, array → list<_>) we slot it there
+                //     and default-synthesize the other non-optional
+                //     fields (empty list, false, "", 0/0.0). Option
+                //     fields default to None as before.
+                //   * If more than one field matches, we throw with
+                //     both candidates named — the substrate does not
+                //     guess between structurally-indistinguishable
+                //     slots.
+                //   * A missing non-optional field on an explicit
+                //     JSON-object call path still throws — synthesis
+                //     only fires on the bare-arg wrap path.
                 final java.util.Map<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> fields =
                         target.getRecordFields();
                 final org.apache.jena.atlas.json.JsonObject obj;
-                if (json.isNumber() && fields.containsKey("limit")) {
-                    obj = new org.apache.jena.atlas.json.JsonObject();
-                    obj.put("limit", json);
-                } else {
+                final boolean synthMissing;
+                if (json.isObject()) {
                     obj = json.getAsObject();
+                    synthMissing = false;
+                } else if (json.isNull()) {
+                    throw new IllegalArgumentException("expected JSON object, got null");
+                } else {
+                    final Object placed = placeBareArgIntoRecord(json, fields);
+                    obj = new org.apache.jena.atlas.json.JsonObject();
+                    obj.put((String) placed, json);
+                    synthMissing = true;
                 }
                 final ai.tegmentum.wasmtime4j.wit.WitRecord.Builder b =
                         ai.tegmentum.wasmtime4j.wit.WitRecord.builder();
@@ -534,6 +556,8 @@ public final class JenaWasmInstance implements Closeable {
                             && fieldTy.getType() == ai.tegmentum.wasmtime4j.component.ComponentType.OPTION) {
                         b.field(name, ai.tegmentum.wasmtime4j.wit.WitOption.none(
                                 witTypeOf(fieldTy.getOptionType())));
+                    } else if (fieldJson == null && synthMissing) {
+                        b.field(name, defaultValFor(fieldTy));
                     } else if (fieldJson == null) {
                         throw new IllegalArgumentException(
                                 "record missing required field `" + name + "`");
@@ -546,6 +570,86 @@ public final class JenaWasmInstance implements Closeable {
             default:
                 throw new IllegalArgumentException(
                         "no JSON→WIT coercion implemented for target kind " + kind);
+        }
+    }
+
+    /**
+     * Bare-arg placement into a record. Picks the sole non-optional
+     * field whose type accepts the bare JSON scalar (by shape: int →
+     * int/float, bool → bool, string → string, array → list). Zero or
+     * multiple matches throw with a specific message so operators see
+     * which candidates were considered.
+     *
+     * <p>Returns the field name string. Kept as a static helper so
+     * {@link RecordCoercionPolicy} tests exercise it without needing a
+     * live component instance.
+     */
+    static String placeBareArgIntoRecord(
+            final org.apache.jena.atlas.json.JsonValue bare,
+            final java.util.Map<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> fields) {
+        final RecordCoercionPolicy.JsonShape scalar = RecordCoercionPolicy.jsonShapeOf(bare);
+        final java.util.List<java.util.Map.Entry<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor>> nonOptional =
+                new java.util.ArrayList<>();
+        for (java.util.Map.Entry<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> e : fields.entrySet()) {
+            if (e.getValue().getType() != ai.tegmentum.wasmtime4j.component.ComponentType.OPTION) {
+                nonOptional.add(e);
+            }
+        }
+        final java.util.List<String> candidates = new java.util.ArrayList<>();
+        for (java.util.Map.Entry<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> e : nonOptional) {
+            if (RecordCoercionPolicy.shapeAccepts(
+                    RecordCoercionPolicy.fieldShapeOf(e.getValue().getType()), scalar)) {
+                candidates.add(e.getKey());
+            }
+        }
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+        if (candidates.isEmpty()) {
+            final java.util.List<String> nonOptNames = new java.util.ArrayList<>();
+            for (java.util.Map.Entry<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> e : nonOptional) {
+                nonOptNames.add(e.getKey() + ": " + e.getValue().getType().name().toLowerCase(java.util.Locale.ROOT));
+            }
+            throw new IllegalArgumentException(
+                    "bare " + scalar + " does not match any non-optional field of record "
+                    + "(non-optional fields: [" + String.join(", ", nonOptNames) + "])");
+        }
+        throw new IllegalArgumentException(
+                "bare arg is ambiguous - matches multiple non-optional fields ("
+                + String.join(", ", candidates) + "); pass an explicit JSON object to disambiguate");
+    }
+
+    /**
+     * Default-synth a WitValue for a target descriptor. Used when the
+     * bare-arg placement path slotted the arg into one field and needs
+     * to fill the other non-optional fields with something sensible.
+     * Empty list, false, "", 0/0.0. Records / tuples / variants are
+     * not synthesized — those need a callsite-provided value.
+     */
+    static ai.tegmentum.wasmtime4j.wit.WitValue defaultValFor(
+            final ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor ty) {
+        final ai.tegmentum.wasmtime4j.component.ComponentType kind = ty.getType();
+        switch (kind) {
+            case BOOL: return ai.tegmentum.wasmtime4j.wit.WitBool.of(false);
+            case S8:  return ai.tegmentum.wasmtime4j.wit.WitS8.of((byte) 0);
+            case U8:  return ai.tegmentum.wasmtime4j.wit.WitU8.of((byte) 0);
+            case S16: return ai.tegmentum.wasmtime4j.wit.WitS16.of((short) 0);
+            case U16: return ai.tegmentum.wasmtime4j.wit.WitU16.of((short) 0);
+            case S32: return ai.tegmentum.wasmtime4j.wit.WitS32.of(0);
+            case U32: return ai.tegmentum.wasmtime4j.wit.WitU32.of(0);
+            case S64: return ai.tegmentum.wasmtime4j.wit.WitS64.of(0L);
+            case U64: return ai.tegmentum.wasmtime4j.wit.WitU64.of(0L);
+            case F32: return ai.tegmentum.wasmtime4j.wit.WitFloat32.of(0.0f);
+            case F64: return ai.tegmentum.wasmtime4j.wit.WitFloat64.of(0.0);
+            case STRING: return witStringUnchecked("");
+            case LIST:
+                return ai.tegmentum.wasmtime4j.wit.WitList.empty(witTypeOf(ty.getElementType()));
+            case OPTION:
+                return ai.tegmentum.wasmtime4j.wit.WitOption.none(witTypeOf(ty.getOptionType()));
+            default:
+                throw new IllegalArgumentException(
+                        "no default-synth value for target kind " + kind
+                        + " - bare-arg record coercion cannot fill this field automatically");
         }
     }
 
