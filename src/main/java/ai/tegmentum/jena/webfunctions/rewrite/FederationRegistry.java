@@ -63,6 +63,19 @@ public final class FederationRegistry {
         /** Substrate {@code wf-document:} URL sugar. */
         WF_DOCUMENT,
         /**
+         * Substrate {@code wf-vector:} URL sugar
+         * (wf-conformance/docs/design/wf-vector.md &sect;04). The
+         * federation pass emits {@code SERVICE <wf-vector:<name>?query=...&k=...>};
+         * in v0.1 only Oxigraph has a native embedded vector index that
+         * folds the URL further, so on Jena the URL stays unfolded and
+         * the query will error unless a wf-vector-capable backend is
+         * federated in some other way. Declared as a first-class source
+         * type so cases can register a WfVector source uniformly across
+         * engines (memo &sect;10 defers native co-located indexes on
+         * Jena / RDF4J / QLever to v0.2+).
+         */
+        WF_VECTOR,
+        /**
          * External HTTP-hosted SPARQL endpoint. Dispatched identically
          * to {@link #SPARQL} at v0.1; kept distinct so operators can
          * flag high-latency / low-availability sources for the v0.2
@@ -259,11 +272,12 @@ public final class FederationRegistry {
             case "wf-search", "wf_search", "WfSearch" -> SourceType.WF_SEARCH;
             case "wf-fetch", "wf_fetch", "WfFetch" -> SourceType.WF_FETCH;
             case "wf-document", "wf_document", "WfDocument" -> SourceType.WF_DOCUMENT;
+            case "wf-vector", "wf_vector", "WfVector" -> SourceType.WF_VECTOR;
             case "http-sparql", "http_sparql", "HttpSparql" -> SourceType.HTTP_SPARQL;
             default -> throw new IllegalArgumentException(
                     "federation registry source `" + name + "`: unknown type `" + typeStr
                             + "` (expected `sparql`, `wf-search`, `wf-fetch`, `wf-document`, "
-                            + "or `http-sparql`)");
+                            + "`wf-vector`, or `http-sparql`)");
         };
     }
 

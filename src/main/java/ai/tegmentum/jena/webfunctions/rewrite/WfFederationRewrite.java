@@ -303,6 +303,13 @@ public final class WfFederationRewrite {
             case WF_SEARCH   -> "wf-search:"   + src.name();
             case WF_FETCH    -> "wf-fetch:"    + src.name();
             case WF_DOCUMENT -> "wf-document:" + src.name();
+            // wf_vector v0.1 — the URL sugar is wf-vector:<name>; Jena
+            // has no native vector index in v0.1 (wf-vector memo §10 —
+            // native co-located indexes on Jena/RDF4J/QLever are v0.2+),
+            // so the emitted URL stays unfolded here and the query will
+            // error unless a wf-vector-capable backend is federated in
+            // some other way.
+            case WF_VECTOR   -> "wf-vector:"   + src.name();
             case SPARQL, HTTP_SPARQL -> src.endpoint();
         };
     }
@@ -332,7 +339,12 @@ public final class WfFederationRewrite {
     private static boolean defaultSilentFor(final SourceType type) {
         return switch (type) {
             case SPARQL, HTTP_SPARQL -> true;
-            case WF_SEARCH, WF_FETCH, WF_DOCUMENT -> false;
+            // WF_VECTOR joins the substrate-local group — a KNN dispatch
+            // failure inside the embedded index (or an unfolded
+            // wf-vector: URL on a non-Oxigraph engine that has no
+            // handler for it) is a real bug the operator should see, not
+            // a network flap to mask (wf-vector memo §09).
+            case WF_SEARCH, WF_FETCH, WF_DOCUMENT, WF_VECTOR -> false;
         };
     }
 
