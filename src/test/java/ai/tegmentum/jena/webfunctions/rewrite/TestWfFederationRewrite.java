@@ -18,6 +18,7 @@ import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.OptionalInt;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -405,6 +406,123 @@ public class TestWfFederationRewrite {
         final List<OpService> services = collectServices(out);
         assertThat(services).hasSize(1);
         assertThat(services.get(0).getService().getURI()).isEqualTo("http://elsewhere/query");
+    }
+
+    // ---------------------------------------------------------------------
+    // SILENT resolution (memo §08)
+    // ---------------------------------------------------------------------
+
+    private static FederationSource sparqlWithSilent(final String name,
+                                                     final String endpoint,
+                                                     final Optional<Boolean> silent,
+                                                     final String... predicates) {
+        return new FederationSource(name, SourceType.SPARQL, endpoint,
+                List.of(predicates), OptionalInt.empty(), silent);
+    }
+
+    private static FederationSource wfSearchWithSilent(final String name,
+                                                       final Optional<Boolean> silent,
+                                                       final String... predicates) {
+        return new FederationSource(name, SourceType.WF_SEARCH,
+                "wf-search:" + name, List.of(predicates), OptionalInt.empty(),
+                silent);
+    }
+
+    /**
+     * Explicit {@code silent: true} on a SPARQL entry emits
+     * {@code SERVICE SILENT} verbatim.
+     */
+    @Test
+    public void federationSourceSilentTrueEmitsSilentService() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                sparqlWithSilent("silent_products",
+                        "http://silent-products/query",
+                        Optional.of(true),
+                        "http://ex/label")));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?p ?l WHERE { ?p ex:label ?l }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final OpService svc = serviceForEndpoint(out, "http://silent-products/query");
+        assertThat(svc).as("products SERVICE present").isNotNull();
+        assertThat(svc.getSilent())
+                .as("explicit silent:true must emit SERVICE SILENT")
+                .isTrue();
+    }
+
+    /**
+     * Explicit {@code silent: false} on a SPARQL entry overrides the
+     * per-type default (which would otherwise be {@code true}).
+     */
+    @Test
+    public void federationSourceSilentFalseEmitsNonSilentService() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                sparqlWithSilent("loud_products",
+                        "http://loud-products/query",
+                        Optional.of(false),
+                        "http://ex/label")));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?p ?l WHERE { ?p ex:label ?l }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final OpService svc = serviceForEndpoint(out, "http://loud-products/query");
+        assertThat(svc).as("products SERVICE present").isNotNull();
+        assertThat(svc.getSilent())
+                .as("explicit silent:false must suppress SERVICE SILENT")
+                .isFalse();
+    }
+
+    /**
+     * Omitted {@code silent} on a SPARQL source falls back to the
+     * type-based default (true — network endpoint, no probing in static
+     * mode).
+     */
+    @Test
+    public void federationSourceSilentDefaultsTrueForSparql() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                sparqlWithSilent("default_products",
+                        "http://default-products/query",
+                        Optional.empty(),
+                        "http://ex/label")));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?p ?l WHERE { ?p ex:label ?l }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final OpService svc = serviceForEndpoint(out, "http://default-products/query");
+        assertThat(svc).as("products SERVICE present").isNotNull();
+        assertThat(svc.getSilent())
+                .as("SPARQL sources default to SILENT when `silent` is omitted")
+                .isTrue();
+    }
+
+    /**
+     * Omitted {@code silent} on a wf-search source falls back to the
+     * type-based default (false — substrate-local dispatch; failures are
+     * bugs the operator needs to see, not network flaps to mask).
+     */
+    @Test
+    public void federationSourceSilentDefaultsFalseForWfSearch() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                wfSearchWithSilent("manuals",
+                        Optional.empty(),
+                        "http://ex/has_manual")));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?p ?m WHERE { ?p ex:has_manual ?m }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final OpService svc = serviceForEndpoint(out, "wf-search:manuals");
+        assertThat(svc).as("wf-search SERVICE present").isNotNull();
+        assertThat(svc.getSilent())
+                .as("wf-search sources default to non-SILENT when `silent` is omitted")
+                .isFalse();
     }
 
     @Test

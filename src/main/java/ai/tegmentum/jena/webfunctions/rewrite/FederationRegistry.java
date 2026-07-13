@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.OptionalInt;
 
 /**
@@ -234,7 +235,20 @@ public final class FederationRegistry {
             probeTtl = OptionalInt.empty();
         }
 
-        return new FederationSource(name, type, endpoint, predicates, probeTtl);
+        final Optional<Boolean> silent;
+        if (hasNonNull(raw, "silent")) {
+            final JsonValue silentNode = raw.get("silent");
+            if (!silentNode.isBoolean()) {
+                throw new IllegalArgumentException(
+                        "federation registry source `" + name
+                                + "`: `silent` must be a boolean");
+            }
+            silent = Optional.of(silentNode.getAsBoolean().value());
+        } else {
+            silent = Optional.empty();
+        }
+
+        return new FederationSource(name, type, endpoint, predicates, probeTtl, silent);
     }
 
     private static SourceType parseType(final String name, final String typeStr) {
@@ -270,17 +284,34 @@ public final class FederationRegistry {
         private final String endpoint;
         private final List<String> predicates;
         private final OptionalInt probeTtlSecs;
+        private final Optional<Boolean> silent;
 
+        /**
+         * Legacy four-field constructor kept for callers that don't need
+         * to specify a silent override. Delegates with
+         * {@link Optional#empty()} so the rewrite pass falls back to the
+         * per-source-type default (memo &sect;08).
+         */
         public FederationSource(final String name,
                                 final SourceType sourceType,
                                 final String endpoint,
                                 final List<String> predicates,
                                 final OptionalInt probeTtlSecs) {
+            this(name, sourceType, endpoint, predicates, probeTtlSecs, Optional.empty());
+        }
+
+        public FederationSource(final String name,
+                                final SourceType sourceType,
+                                final String endpoint,
+                                final List<String> predicates,
+                                final OptionalInt probeTtlSecs,
+                                final Optional<Boolean> silent) {
             this.name = name;
             this.sourceType = sourceType;
             this.endpoint = endpoint;
             this.predicates = List.copyOf(predicates);
             this.probeTtlSecs = probeTtlSecs;
+            this.silent = silent;
         }
 
         public String name()              { return name; }
@@ -301,5 +332,17 @@ public final class FederationRegistry {
          * migration.
          */
         public OptionalInt probeTtlSecs() { return probeTtlSecs; }
+        /**
+         * Optional override for {@code SERVICE SILENT} semantics on this
+         * source's emitted {@code SERVICE} clauses.
+         * {@link Optional#empty()} means "use the per-source-type
+         * default" &mdash; SPARQL / HTTP_SPARQL default to silent
+         * (network endpoints; transport errors degrade to empty
+         * bindings without probing); WF_SEARCH / WF_FETCH / WF_DOCUMENT
+         * default to non-silent (substrate-local dispatch; a failure is
+         * a real bug the operator should see). Explicit value wins.
+         * See design memo &sect;08 for the resolution rule.
+         */
+        public Optional<Boolean> silent() { return silent; }
     }
 }
