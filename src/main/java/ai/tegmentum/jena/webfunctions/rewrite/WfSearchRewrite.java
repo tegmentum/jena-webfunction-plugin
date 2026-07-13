@@ -36,9 +36,16 @@ import java.util.Map;
  * </pre>
  *
  * <p>Recognised opt keys: {@code highlight}, {@code lang}, {@code filter},
- * {@code limit}, {@code offset}, {@code include_body}. Any other key is
- * silently ignored so operators can drop future keys in without a
- * planner-level upgrade.
+ * {@code limit}, {@code offset}, {@code include_body}, {@code after},
+ * {@code before}. Any other key is silently ignored so operators can drop
+ * future keys in without a planner-level upgrade.
+ *
+ * <p>{@code @time-spec} and the range opts ({@code ?after=} /
+ * {@code ?before=}) are mutually exclusive: a URL that combines them is
+ * rejected at parse time so the outer rewrite pass leaves the SERVICE
+ * untouched (the conservative "unknown SERVICE" fallback). This is the
+ * v1.3 range-queries feature — see
+ * {@code wf-conformance/docs/design/wf-document-v1.md} &sect;05.
  *
  * <h3>Skip conditions</h3>
  * <ul>
@@ -226,6 +233,16 @@ public final class WfSearchRewrite {
                 }
             }
         }
+
+        // v1.3: @time-spec and ?after= / ?before= are mutually exclusive.
+        // Reject at parse time so the outer rewrite pass falls through and
+        // leaves the SERVICE untouched (the conservative "unknown SERVICE"
+        // fallback).
+        final boolean hasTimeSpec = atTime != null || atRev != null;
+        final boolean hasRangeOpt = opts.containsKey("after") || opts.containsKey("before");
+        if (hasTimeSpec && hasRangeOpt) {
+            return null;
+        }
         return new ParsedUrl(name, atTime, atRev, opts);
     }
 
@@ -237,6 +254,8 @@ public final class WfSearchRewrite {
             case "limit":
             case "offset":
             case "include_body":
+            case "after":
+            case "before":
                 return true;
             default:
                 return false;
@@ -324,12 +343,15 @@ public final class WfSearchRewrite {
     /**
      * Query-time opts JSON, hand-built for a stable, testable key order:
      * {@code {"limit":N[,"offset":N][,"highlight":true|false][,"lang":"..."]
-     * [,"filter":"..."][,"include_body":true|false][,"at_time":"..."]
-     * [,"at_rev":N]}}.
+     * [,"filter":"..."][,"include_body":true|false][,"after":"..."]
+     * [,"before":"..."][,"at_time":"..."][,"at_rev":N]}}.
      *
      * <p>The {@code at_time}/{@code at_rev} bake-in is the whole point of
      * the sugar — the URL's {@code @time-spec} winds up here so the guest
-     * doesn't need to re-parse the URL.
+     * doesn't need to re-parse the URL. The v1.3 range fields
+     * {@code after}/{@code before} ride in the same slot; they and
+     * {@code at_time}/{@code at_rev} are mutually exclusive by the parser
+     * (a URL that mixes them fails to parse).
      */
     private static String buildOptsJson(final ParsedUrl parsed, final int limit) {
         final StringBuilder sb = new StringBuilder();
@@ -340,6 +362,8 @@ public final class WfSearchRewrite {
         appendStrIfPresent(sb, parsed.opts.get("lang"), "lang");
         appendStrIfPresent(sb, parsed.opts.get("filter"), "filter");
         appendBoolIfPresent(sb, parsed.opts.get("include_body"), "include_body");
+        appendStrIfPresent(sb, parsed.opts.get("after"), "after");
+        appendStrIfPresent(sb, parsed.opts.get("before"), "before");
         if (parsed.atTime != null) {
             sb.append(",\"at_time\":\"").append(jsonEscape(parsed.atTime)).append('"');
         }
