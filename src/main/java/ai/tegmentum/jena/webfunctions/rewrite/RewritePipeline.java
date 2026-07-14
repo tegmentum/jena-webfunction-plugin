@@ -121,6 +121,14 @@ public final class RewritePipeline {
         // 3. Alias rewrite — alias → canonical everywhere.
         final AliasRewrite.Result aliasRes = AliasRewrite.rewrite(cursor, ctx.aliasMap);
         cursor = aliasRes.rewrittenOp;
+        // 3b. wf-vector federation dispatch (wf-vector memo §07.1 / §10):
+        //     wrap SERVICE <wf-vector:<name>?…> in an outer
+        //     SERVICE <http-endpoint> when the FederationRegistry has a
+        //     matching WF_VECTOR source with an HTTP endpoint. Runs
+        //     BEFORE WfFederationRewrite so the synthesised outer
+        //     HTTP-SERVICE never becomes a candidate for BGP
+        //     federation. Empty registry short-circuits.
+        cursor = WfVectorRewrite.rewrite(cursor, ctx.federationRegistry);
         // 4. Federation rewrite — assign registered BGP triples to their
         //    federated source and emit SERVICE clauses. Runs before
         //    wf-search so the synthesised `wf-search:` URIs are visible
