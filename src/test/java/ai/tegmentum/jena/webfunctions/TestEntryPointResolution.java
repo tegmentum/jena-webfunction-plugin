@@ -3,7 +3,6 @@ package ai.tegmentum.jena.webfunctions;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.File;
@@ -75,19 +74,13 @@ public class TestEntryPointResolution {
     }
 
     /**
-     * wf:fulltext exports only {@code search}. Step 3 of the resolution
-     * order — the single-top-level-function fallback picks it.
-     *
-     * <p>Blocked on wf_call {@code resolve_entry_point} multi-export
-     * ambiguity — see gap #4. The current wf_fulltext guest has evolved
-     * to export {@code search, insert-batch, delete-batch} (no
-     * {@code evaluate}); the resolver correctly refuses to guess and
-     * throws, but that means this test's step-3 assertion no longer
-     * matches reality. Re-enable once the resolver learns to prefer a
-     * well-known primary export (e.g. {@code search} on wf:fulltext) or
-     * once the guest re-exposes a single top-level function.
+     * wf:fulltext exports {@code search, insert-batch, delete-batch}.
+     * {@code search} is a well-known primary export
+     * ({@link JenaWasmInstance#WELL_KNOWN_ENTRY_POINTS}), so the
+     * step-3 heuristic picks it over the admin/mutation exports.
+     * Closes the multi-export ambiguity that blocked
+     * fulltext_document_corpus.
      */
-    @Ignore("blocked on wf_call resolve_entry_point multi-export ambiguity — see gap #4")
     @Test
     public void resolvesSearchOnWfFulltext() throws Exception {
         final File wasm = new File(WF_FULLTEXT_WASM);
@@ -97,6 +90,30 @@ public class TestEntryPointResolution {
         try (JenaWasmInstance instance = new JenaWasmInstance(url)) {
             assertThat(instance.resolveEntryPoint(null)).isEqualTo("search");
         }
+    }
+
+    /**
+     * Direct coverage of the well-known-name heuristic against the
+     * exact wf_fulltext export set. Exercised via the pure static
+     * helper so the test doesn't depend on the guest wasm being on
+     * disk.
+     */
+    @Test
+    public void staticHelperPicksSearchOverAdminExports() {
+        final List<String> exports = List.of("search", "insert-batch", "delete-batch");
+        assertThat(JenaWasmInstance.resolveEntryPoint(null, exports, "file:///wf_fulltext.wasm"))
+                .isEqualTo("search");
+    }
+
+    /**
+     * Well-known list order matters: {@code search} beats
+     * {@code execute} when both are present.
+     */
+    @Test
+    public void staticHelperHonoursWellKnownOrder() {
+        final List<String> exports = List.of("execute", "search");
+        assertThat(JenaWasmInstance.resolveEntryPoint(null, exports, "file:///demo.wasm"))
+                .isEqualTo("search");
     }
 
     /**

@@ -708,6 +708,18 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     /**
+     * Well-known primary export names, in preference order. Mirrors
+     * {@code oxigraph-wf/src/wf_call.rs::WELL_KNOWN_ENTRY_POINTS}. Used
+     * as the step-3 heuristic in {@link #resolveEntryPoint(String, List,
+     * String)} when a guest ships no {@code evaluate} — e.g. wf_fulltext
+     * exports {@code search} alongside {@code insert-batch} and
+     * {@code delete-batch}, and the query dispatch is the SPARQL-facing
+     * surface.
+     */
+    static final List<String> WELL_KNOWN_ENTRY_POINTS =
+            List.of("search", "execute", "run", "dispatch");
+
+    /**
      * Resolve which exported function this instance should invoke.
      *
      * <p>Resolution order (mirrors
@@ -716,9 +728,13 @@ public final class JenaWasmInstance implements Closeable {
      *   <li>Caller-supplied {@code override} — used verbatim.</li>
      *   <li>{@code evaluate} — the substrate default. Every stardog:webfunction
      *       guest exports it.</li>
-     *   <li>A single top-level function export. Covers guests whose WIT
-     *       world genuinely names its export differently (wf:fulltext
-     *       exports {@code search}).</li>
+     *   <li>A well-known primary export from
+     *       {@link #WELL_KNOWN_ENTRY_POINTS} (in order). Covers domain
+     *       WIT worlds like wf:fulltext that export {@code search}
+     *       alongside admin/mutation entry points.</li>
+     *   <li>A single top-level function export. Retained for
+     *       single-export guests whose WIT world names its export off
+     *       the well-known list.</li>
      *   <li>Otherwise throw, listing the visible exports so the caller can
      *       pick one via {@code InvokeSpec.entryPoint}.</li>
      * </ol>
@@ -733,7 +749,7 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     /**
-     * Pure resolution — same 4-step semantics as
+     * Pure resolution — same 5-step semantics as
      * {@link #resolveEntryPoint(String)} but without any component
      * interaction. Exposed at package scope so tests can exercise the
      * ambiguous-multi-export path without a matching fixture.
@@ -747,6 +763,11 @@ public final class JenaWasmInstance implements Closeable {
         if (topLevelExports.contains("evaluate")) {
             return "evaluate";
         }
+        for (String candidate : WELL_KNOWN_ENTRY_POINTS) {
+            if (topLevelExports.contains(candidate)) {
+                return candidate;
+            }
+        }
         if (topLevelExports.isEmpty()) {
             throw new IllegalStateException(
                     "component at " + urlForErrors
@@ -758,7 +779,9 @@ public final class JenaWasmInstance implements Closeable {
         throw new IllegalStateException(
                 "component at " + urlForErrors
                 + " has multiple function exports " + topLevelExports
-                + " and no `evaluate` — specify one via InvokeSpec.entryPoint");
+                + " and no `evaluate` or well-known primary export ("
+                + String.join(", ", WELL_KNOWN_ENTRY_POINTS)
+                + ") — specify one via InvokeSpec.entryPoint");
     }
 
     /**
