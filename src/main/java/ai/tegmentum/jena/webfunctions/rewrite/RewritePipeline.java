@@ -132,8 +132,14 @@ public final class RewritePipeline {
         //    in (wf-document-v1.md §05). Runs after Alias so the SERVICE
         //    URI is already canonical, and before Fulltext/Shape so the
         //    subsequent passes see the substituted invoke IRI as opaque.
+        // WfSearchRewrite consults BOTH DocumentRegistry (primary,
+        // wf_document guest ABI) and FulltextRegistry (fallback,
+        // wf_fulltext guest ABI); additionally, FederationRegistry is a
+        // third fallback so `wf-search:<name>` URLs registered ONLY as a
+        // federation source of type wf-search (the
+        // federation_heterogeneous shape) still fold.
         cursor = WfSearchRewrite.rewrite(cursor, ctx.documentRegistry,
-                ctx.fulltextRegistry, ctx.invokeRegistry);
+                ctx.fulltextRegistry, ctx.federationRegistry, ctx.invokeRegistry);
         // 5. Fulltext filter-fold — lift FILTER over indexed predicates
         //    into a SERVICE <wf-invoke:> dispatch (memo §06). Runs after
         //    Alias so we see canonical predicate IRIs, and before Shape so
