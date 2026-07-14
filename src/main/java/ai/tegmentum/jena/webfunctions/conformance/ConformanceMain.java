@@ -17,6 +17,7 @@ import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
 import org.apache.jena.atlas.json.JsonValue;
 import org.apache.jena.graph.Node;
+import org.apache.jena.graph.Triple;
 import org.apache.jena.query.Dataset;
 import org.apache.jena.query.DatasetFactory;
 import org.apache.jena.query.Query;
@@ -221,19 +222,90 @@ public final class ConformanceMain {
         final Query query = QueryFactory.create(queryText);
 
         try (QueryExecution qe = QueryExecutionFactory.create(query, dataset)) {
-            final ResultSet rs = qe.execSelect();
-            // ALIAS_STATE_SYMBOL is stashed on the engine's Context during
-            // modifyOp — which is the same Context instance backing
-            // qe.getContext(). Pull it out here for the output rewrite.
-            final Object stateObj = qe.getContext().get(
-                    WebFunctionQueryEngine.ALIAS_STATE_SYMBOL);
-            final AliasRewriteState state = stateObj instanceof AliasRewriteState s
-                    ? s : AliasRewriteState.inactive();
-            final ResultSet wrapped = wrapWithAliasRewrite(rs, state);
-            ResultSetFormatter.outputAsJSON(out, wrapped);
+            // Dispatch on query shape. SELECT is the historical happy
+            // path; CONSTRUCT / DESCRIBE surface their triples as an
+            // s/p/o tuple-shape ResultSet so the conformance runner (which
+            // canonicalises SPARQL Results JSON only) can compare without
+            // a graph-shape-aware code path. ASK bypasses the ResultSet
+            // machinery entirely and writes the SPARQL Results JSON
+            // boolean shape directly.
+            if (query.isSelectType()) {
+                final ResultSet rs = qe.execSelect();
+                final AliasRewriteState state = readAliasState(qe);
+                final ResultSet wrapped = wrapWithAliasRewrite(rs, state);
+                ResultSetFormatter.outputAsJSON(out, wrapped);
+            } else if (query.isAskType()) {
+                final boolean answer = qe.execAsk();
+                writeAskAsJson(out, answer);
+            } else if (query.isConstructType() || query.isDescribeType()) {
+                final Iterator<Triple> triples = query.isConstructType()
+                        ? qe.execConstructTriples()
+                        : qe.execDescribeTriples();
+                final AliasRewriteState state = readAliasState(qe);
+                final ResultSet wrapped = triplesAsSpoResultSet(triples, state);
+                ResultSetFormatter.outputAsJSON(out, wrapped);
+            } else {
+                throw new IllegalArgumentException(
+                        "conformance-main: unsupported query shape (queryType="
+                                + query.queryType() + ")");
+            }
             out.flush();
         }
         return 0;
+    }
+
+    /**
+     * Pull the alias-rewrite state off the per-query ARQ Context. The
+     * modifyOp pass populates {@link WebFunctionQueryEngine#ALIAS_STATE_SYMBOL}
+     * during plan construction, so this returns a populated state once the
+     * execution has been kicked off (via execSelect / execConstructTriples
+     * / execDescribeTriples / execAsk) and an inactive state otherwise.
+     */
+    private static AliasRewriteState readAliasState(final QueryExecution qe) {
+        final Object stateObj = qe.getContext().get(
+                WebFunctionQueryEngine.ALIAS_STATE_SYMBOL);
+        return stateObj instanceof AliasRewriteState s
+                ? s : AliasRewriteState.inactive();
+    }
+
+    /**
+     * Wrap an {@link Iterator} of {@link Triple}s as a {@link ResultSet}
+     * with three columns — {@code ?s}, {@code ?p}, {@code ?o} — one row
+     * per triple. Runs each node through {@link AliasRewriteState}
+     * so output IRIs come back under whatever alias the query mentioned,
+     * matching the wrapping the SELECT path already performs.
+     */
+    private static ResultSet triplesAsSpoResultSet(final Iterator<Triple> triples,
+                                                   final AliasRewriteState state) {
+        final Var vs = Var.alloc("s");
+        final Var vp = Var.alloc("p");
+        final Var vo = Var.alloc("o");
+        final List<Var> vars = List.of(vs, vp, vo);
+        final Iterator<Binding> transformed = new Iterator<>() {
+            @Override public boolean hasNext() { return triples.hasNext(); }
+            @Override public Binding next() {
+                final Triple t = triples.next();
+                final BindingBuilder bb = Binding.builder();
+                bb.add(vs, state.isActive() ? state.rewriteNode(t.getSubject())   : t.getSubject());
+                bb.add(vp, state.isActive() ? state.rewriteNode(t.getPredicate()) : t.getPredicate());
+                bb.add(vo, state.isActive() ? state.rewriteNode(t.getObject())    : t.getObject());
+                return bb.build();
+            }
+        };
+        return ResultSetStream.create(vars, transformed);
+    }
+
+    /**
+     * Emit the SPARQL 1.1 Results JSON boolean serialization —
+     * {@code {"head":{},"boolean":true|false}} — for an ASK result. Hand-
+     * rolled rather than routed through {@link ResultSetFormatter} because
+     * the Jena formatter API takes different arg shapes for tuple vs
+     * boolean results and we only need the two-key wire form here.
+     */
+    private static void writeAskAsJson(final PrintStream out, final boolean answer) {
+        out.print("{\"head\":{},\"boolean\":");
+        out.print(answer ? "true" : "false");
+        out.print('}');
     }
 
     // ---------------------------------------------------------------
