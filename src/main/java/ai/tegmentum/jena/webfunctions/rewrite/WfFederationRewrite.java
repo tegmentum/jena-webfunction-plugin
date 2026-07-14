@@ -310,6 +310,12 @@ public final class WfFederationRewrite {
             // error unless a wf-vector-capable backend is federated in
             // some other way.
             case WF_VECTOR   -> "wf-vector:"   + src.name();
+            // wf-relational v0.1 — emit the URL sugar; downstream
+            // dispatch piggybacks on wf_fetch (memo §04). Jena has no
+            // wf-relational-aware URL handler in v0.1, so the emitted
+            // URL stays unfolded unless a wf-fetch dispatcher on the
+            // JVM side grows Postgres support.
+            case WF_RELATIONAL -> "wf-relational:" + src.name();
             case SPARQL, HTTP_SPARQL -> src.endpoint();
         };
     }
@@ -338,7 +344,11 @@ public final class WfFederationRewrite {
 
     private static boolean defaultSilentFor(final SourceType type) {
         return switch (type) {
-            case SPARQL, HTTP_SPARQL -> true;
+            // wf_relational v0.1 defaults to silent per its own memo
+            // §09 — Postgres is a network endpoint; transport errors
+            // should degrade to empty bindings rather than fail the
+            // whole federated query.
+            case SPARQL, HTTP_SPARQL, WF_RELATIONAL -> true;
             // WF_VECTOR joins the substrate-local group — a KNN dispatch
             // failure inside the embedded index (or an unfolded
             // wf-vector: URL on a non-Oxigraph engine that has no

@@ -76,6 +76,19 @@ public final class FederationRegistry {
          */
         WF_VECTOR,
         /**
+         * Substrate {@code wf-relational:} URL sugar (wf-relational
+         * design memo &sect;04). {@link FederationSource#endpoint()}
+         * holds a {@code postgres://…/db} URL &mdash; Postgres is the
+         * only v0.1 backend. The federation pass emits
+         * {@code SERVICE <wf-relational:<name>>} and hands dispatch to
+         * {@code wf_fetch}, whose shape descriptor's
+         * {@code sink_kind = "postgres"} tells the guest to speak
+         * Postgres-SQL. Jena ships the registry plumbing; end-to-end
+         * dispatch is gated on the host sink layer growing a Postgres
+         * backend (memo &sect;11 step 2).
+         */
+        WF_RELATIONAL,
+        /**
          * External HTTP-hosted SPARQL endpoint. Dispatched identically
          * to {@link #SPARQL} at v0.1; kept distinct so operators can
          * flag high-latency / low-availability sources for the v0.2
@@ -273,11 +286,12 @@ public final class FederationRegistry {
             case "wf-fetch", "wf_fetch", "WfFetch" -> SourceType.WF_FETCH;
             case "wf-document", "wf_document", "WfDocument" -> SourceType.WF_DOCUMENT;
             case "wf-vector", "wf_vector", "WfVector" -> SourceType.WF_VECTOR;
+            case "wf-relational", "wf_relational", "WfRelational" -> SourceType.WF_RELATIONAL;
             case "http-sparql", "http_sparql", "HttpSparql" -> SourceType.HTTP_SPARQL;
             default -> throw new IllegalArgumentException(
                     "federation registry source `" + name + "`: unknown type `" + typeStr
                             + "` (expected `sparql`, `wf-search`, `wf-fetch`, `wf-document`, "
-                            + "`wf-vector`, or `http-sparql`)");
+                            + "`wf-vector`, `wf-relational`, or `http-sparql`)");
         };
     }
 
