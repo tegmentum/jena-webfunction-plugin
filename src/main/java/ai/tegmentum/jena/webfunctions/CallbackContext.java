@@ -8,6 +8,7 @@ import org.apache.jena.query.QuerySolutionMap;
 import org.apache.jena.query.ResultSet;
 import org.apache.jena.query.ResultSetFactory;
 import org.apache.jena.graph.Node;
+import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
 import org.apache.jena.rdf.model.RDFNode;
@@ -131,24 +132,124 @@ public final class CallbackContext {
     }
 
     /**
-     * Execute a SPARQL SELECT with the given initial bindings pre-applied and
-     * return the materialised {@link ResultSet}. The sub-query goes through
-     * the standard Jena executor with the same dataset the outer query saw.
+     * Execute an arbitrary SPARQL query with the given initial bindings and
+     * return the materialised {@link ResultSet}. Dispatches on query shape:
+     * <ul>
+     *   <li>SELECT: {@code qe.execSelect()} — passes through unchanged.</li>
+     *   <li>CONSTRUCT / DESCRIBE: {@code qe.execConstruct()} /
+     *       {@code qe.execDescribe()} → each triple becomes one binding row
+     *       with vars {@code s}, {@code p}, {@code o} (mirrors Oxigraph's
+     *       {@code QueryResults::Graph} shape in {@code oxigraph-wf/src/host.rs}
+     *       so guests like {@code wf_infer} that expect the SPO binding shape
+     *       across engines just work).</li>
+     *   <li>ASK: {@code qe.execAsk()} → single row with pseudo-var
+     *       {@code _ask} bound to an {@code xsd:boolean} literal (mirrors
+     *       Oxigraph's {@code QueryResults::Boolean} shape).</li>
+     * </ul>
      *
      * <p>Uses {@code substitution(...)} on the Jena 6.x builder — the
      * initial-binding path renamed from earlier releases. Every variable in
      * the QuerySolutionMap gets substituted into the query's algebra before
      * evaluation, matching the SPARQL 1.1 initial-bindings semantics.
+     *
+     * <p>Method name kept as {@code executeSelect} for backward compatibility
+     * with existing host-callback wiring; it now handles the full query
+     * shape space, not just SELECT.
      */
     public ResultSet executeSelect(final String sparql, final QuerySolutionMap initial) {
         final Query q = QueryFactory.create(sparql);
-        try (QueryExecution qe = QueryExecutionDatasetBuilder.create()
-                .query(q)
-                .dataset(org.apache.jena.query.DatasetFactory.wrap(dataset))
-                .substitution(initial)
-                .build()) {
-            return ResultSetFactory.copyResults(qe.execSelect());
+        if (q.isSelectType()) {
+            try (QueryExecution qe = QueryExecutionDatasetBuilder.create()
+                    .query(q)
+                    .dataset(org.apache.jena.query.DatasetFactory.wrap(dataset))
+                    .substitution(initial)
+                    .build()) {
+                return ResultSetFactory.copyResults(qe.execSelect());
+            }
         }
+        if (q.isConstructType() || q.isDescribeType()) {
+            final org.apache.jena.rdf.model.Model model;
+            try (QueryExecution qe = QueryExecutionDatasetBuilder.create()
+                    .query(q)
+                    .dataset(org.apache.jena.query.DatasetFactory.wrap(dataset))
+                    .substitution(initial)
+                    .build()) {
+                model = q.isConstructType() ? qe.execConstruct() : qe.execDescribe();
+            }
+            return modelToSpoResultSet(model);
+        }
+        if (q.isAskType()) {
+            final boolean answer;
+            try (QueryExecution qe = QueryExecutionDatasetBuilder.create()
+                    .query(q)
+                    .dataset(org.apache.jena.query.DatasetFactory.wrap(dataset))
+                    .substitution(initial)
+                    .build()) {
+                answer = qe.execAsk();
+            }
+            return askBooleanResultSet(answer);
+        }
+        throw new RuntimeException(
+            "wf callback: unsupported SPARQL query shape (not SELECT / CONSTRUCT / "
+            + "DESCRIBE / ASK)");
+    }
+
+    /**
+     * Wrap an execConstruct/execDescribe {@link org.apache.jena.rdf.model.Model}
+     * as a {@link ResultSet} with vars {@code s}, {@code p}, {@code o} — one
+     * row per statement. Matches Oxigraph's SPO shape for CONSTRUCT/DESCRIBE
+     * returned via {@code execute-query} so cross-engine guests get the same
+     * binding-sets envelope back regardless of substrate.
+     */
+    private static ResultSet modelToSpoResultSet(final org.apache.jena.rdf.model.Model model) {
+        final org.apache.jena.sparql.core.Var vs = org.apache.jena.sparql.core.Var.alloc("s");
+        final org.apache.jena.sparql.core.Var vp = org.apache.jena.sparql.core.Var.alloc("p");
+        final org.apache.jena.sparql.core.Var vo = org.apache.jena.sparql.core.Var.alloc("o");
+        final java.util.List<org.apache.jena.sparql.engine.binding.Binding> bindings =
+                new java.util.ArrayList<>();
+        final org.apache.jena.rdf.model.StmtIterator it = model.listStatements();
+        try {
+            while (it.hasNext()) {
+                final org.apache.jena.rdf.model.Statement st = it.next();
+                final org.apache.jena.sparql.engine.binding.BindingBuilder bb =
+                        org.apache.jena.sparql.engine.binding.BindingFactory.builder();
+                bb.add(vs, st.getSubject().asNode());
+                bb.add(vp, st.getPredicate().asNode());
+                bb.add(vo, st.getObject().asNode());
+                bindings.add(bb.build());
+            }
+        } finally {
+            it.close();
+        }
+        final org.apache.jena.sparql.engine.QueryIterator qIter =
+                org.apache.jena.sparql.engine.iterator.QueryIterPlainWrapper.create(bindings.iterator());
+        return org.apache.jena.sparql.engine.ResultSetStream.create(
+                java.util.List.of("s", "p", "o"),
+                ModelFactory.createDefaultModel(),
+                qIter);
+    }
+
+    /**
+     * Wrap an execAsk answer as a single-row {@link ResultSet} with the
+     * pseudo-var {@code _ask} bound to an {@code xsd:boolean} literal.
+     * Matches Oxigraph's {@code QueryResults::Boolean} encoding so guests
+     * get the same binding-sets envelope for ASK across engines.
+     */
+    private static ResultSet askBooleanResultSet(final boolean answer) {
+        final org.apache.jena.sparql.core.Var vAsk = org.apache.jena.sparql.core.Var.alloc("_ask");
+        final org.apache.jena.graph.Node lit = NodeFactory.createLiteralDT(
+                Boolean.toString(answer),
+                org.apache.jena.datatypes.xsd.XSDDatatype.XSDboolean);
+        final org.apache.jena.sparql.engine.binding.BindingBuilder bb =
+                org.apache.jena.sparql.engine.binding.BindingFactory.builder();
+        bb.add(vAsk, lit);
+        final org.apache.jena.sparql.engine.QueryIterator qIter =
+                org.apache.jena.sparql.engine.iterator.QueryIterPlainWrapper.create(
+                        java.util.List.of(bb.build()).iterator());
+        return org.apache.jena.sparql.engine.ResultSetStream.create(
+                java.util.List.of("_ask"),
+                ModelFactory.createDefaultModel(),
+                qIter);
     }
 
     /**
