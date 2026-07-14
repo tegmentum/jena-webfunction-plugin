@@ -35,10 +35,18 @@ import java.util.Map;
  *   time-spec ::= ISO-8601-UTC | "rev" &lt;N&gt;
  * </pre>
  *
- * <p>Recognised opt keys: {@code highlight}, {@code lang}, {@code filter},
- * {@code limit}, {@code offset}, {@code include_body}, {@code after},
- * {@code before}. Any other key is silently ignored so operators can drop
- * future keys in without a planner-level upgrade.
+ * <p>Recognised opt keys: {@code query}, {@code highlight}, {@code lang},
+ * {@code filter}, {@code limit}, {@code offset}, {@code include_body},
+ * {@code after}, {@code before}. Any other key is silently ignored so
+ * operators can drop future keys in without a planner-level upgrade.
+ *
+ * <p>{@code ?query=<term>} URL-parameter sugar: an alternative to the
+ * body-triple form. When the SERVICE body does not carry a
+ * {@code wf:query "…"} triple, the folder falls back to the URL opt so
+ * cases like {@code SERVICE <wf-search:manuals-search?query=waterproof>
+ * { ?_ wf:doc ?m }} still lift to {@code wf-invoke:<hex>}. Body-triple
+ * form still wins when both are present (the body is closer to the
+ * caller's intent than a URL string decorated by federation config).
  *
  * <p>{@code @time-spec} and the range opts ({@code ?after=} /
  * {@code ?before=}) are mutually exclusive: a URL that combines them is
@@ -51,8 +59,9 @@ import java.util.Map;
  * <ul>
  *   <li>The registered {@code name} isn't in the {@link DocumentRegistry}
  *       (or the registry is empty).</li>
- *   <li>The SERVICE body has no {@code wf:query "value"} triple — the
- *       sugar carries no search string, so there's nothing to invoke.</li>
+ *   <li>Neither a {@code wf:query "value"} triple in the SERVICE body
+ *       nor a {@code ?query=<value>} URL opt is present — the sugar
+ *       carries no search string, so there's nothing to invoke.</li>
  * </ul>
  * Both are pass-throughs, not errors — a misconfigured name should
  * surface as a normal SPARQL "no such service" at execution time, not a
@@ -159,10 +168,17 @@ public final class WfSearchRewrite {
                 return super.transform(opService, subOp);
             }
 
-            final String query = findQueryLiteral(subOp);
+            String query = findQueryLiteral(subOp);
             if (query == null) {
-                // No wf:query triple in the body -> nothing to invoke on.
-                return super.transform(opService, subOp);
+                // No wf:query triple in the body -> fall back to the URL
+                // opt `?query=<term>` (the URL-parameter sugar form used
+                // by federation cases whose SERVICE body doesn't spell
+                // out the search string in a triple). If neither is
+                // present, there's nothing to invoke on.
+                query = parsed.opts.get("query");
+                if (query == null || query.isEmpty()) {
+                    return super.transform(opService, subOp);
+                }
             }
 
             // Walk the SERVICE body ONCE at rewrite time to derive the
@@ -316,6 +332,11 @@ public final class WfSearchRewrite {
 
     private static boolean isRecognisedOpt(final String key) {
         switch (key) {
+            // `query` is the URL-parameter sugar for the body-triple
+            // form; the folder consumes it directly and does NOT
+            // propagate it into `opts_json` (the guest never receives a
+            // `query` opt — the query string is a positional arg).
+            case "query":
             case "highlight":
             case "lang":
             case "filter":

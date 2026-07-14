@@ -312,6 +312,57 @@ public class TestWfSearchRewrite {
         assertThat(inv.size()).isZero();
     }
 
+    @Test
+    public void urlQueryParamFoldsWithoutBodyTriple() {
+        // The URL-parameter sugar (`?query=<term>`) supplies the search
+        // string when the SERVICE body has no `wf:query "…"` triple.
+        // Shape used by `federation_heterogeneous.toml`: the wf-search
+        // side of a heterogeneous federation query.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc WHERE {\n"
+                + "  SERVICE <wf-search:manuals?query=waterproof> {\n"
+                + "    ?_ wf:doc ?doc .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out))
+                .as("?query=<term> URL param must fold without a wf:query body triple")
+                .isTrue();
+        assertThat(hasWfSearchService(out)).isFalse();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        // Positional arg 3 is the search string — must be the URL opt.
+        assertThat(spec.args.get(3).getLiteralLexicalForm()).isEqualTo("waterproof");
+        // `query` is NOT propagated into opts_json — the guest reads
+        // the string from the positional arg, not from opts.
+        assertThat(optsJsonArg(spec)).doesNotContain("\"query\"");
+    }
+
+    @Test
+    public void bodyWfQueryWinsOverUrlQueryParam() {
+        // When both a body `wf:query "…"` triple AND a URL `?query=<term>`
+        // opt are present, the body-triple form wins — it is closer to
+        // the caller's intent than a URL string decorated by federation
+        // config.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc WHERE {\n"
+                + "  SERVICE <wf-search:manuals?query=urlterm> {\n"
+                + "    ?_ wf:query \"bodyterm\" ; wf:doc ?doc .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(spec.args.get(3).getLiteralLexicalForm()).isEqualTo("bodyterm");
+    }
+
     // ---------------------------------------------------------------------
     // Memo §10 smart-set: wf:snippet → highlight=true
     // ---------------------------------------------------------------------
