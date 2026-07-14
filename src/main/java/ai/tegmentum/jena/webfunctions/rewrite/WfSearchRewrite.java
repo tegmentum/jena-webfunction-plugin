@@ -66,6 +66,13 @@ public final class WfSearchRewrite {
 
     static final String WF_NS = "http://tegmentum.ai/ns/webfunction/";
     static final String WF_QUERY = WF_NS + "query";
+    /**
+     * Guest-emitted column name the SERVICE body binds via
+     * {@code ?_ wf:snippet ?var}. Its presence in the collected output
+     * projection drives the memo &sect;10 smart-set of
+     * {@code highlight: true} on the emitted opts JSON.
+     */
+    private static final String WF_SNIPPET_COL = "snippet";
 
     /** The URL scheme this pass recognises at the SERVICE position. */
     public static final String WF_SEARCH_SCHEME = "wf-search:";
@@ -170,11 +177,19 @@ public final class WfSearchRewrite {
             // (`qlever-wf-runtime::wf_search_rewrite` commit `04fdb03`).
             final Map<String, String> projection = collectOutputProjection(subOp);
 
+            // Memo §10 smart-set flag. `wf:snippet` in the body means
+            // the caller expects the snippet cell populated — set
+            // `highlight: true` in the emitted opts JSON unless the
+            // URL sugar explicitly overrode it. Cheap lookup: the
+            // projection map is already keyed on the guest column.
+            final boolean projectsSnippet = projection.containsKey(WF_SNIPPET_COL);
+
             // Primary path: DocumentRegistry (wf_document guest ABI).
             final DocumentRegistry.DocumentIndex docEntry =
                     registry == null ? null : registry.byName(parsed.name);
             if (docEntry != null) {
-                final String iri = allocateDocumentInvoke(docEntry, parsed, query, projection);
+                final String iri = allocateDocumentInvoke(
+                        docEntry, parsed, query, projection, projectsSnippet);
                 final Node newSvc = NodeFactory.createURI(iri);
                 return new OpService(newSvc, subOp, opService.getSilent());
             }
@@ -185,7 +200,8 @@ public final class WfSearchRewrite {
             final FulltextRegistry.FulltextIndex ftEntry =
                     fulltextRegistry == null ? null : fulltextRegistry.byName(parsed.name);
             if (ftEntry != null) {
-                final String iri = allocateFulltextInvoke(ftEntry, parsed, query, projection);
+                final String iri = allocateFulltextInvoke(
+                        ftEntry, parsed, query, projection, projectsSnippet);
                 final Node newSvc = NodeFactory.createURI(iri);
                 return new OpService(newSvc, subOp, opService.getSilent());
             }
@@ -421,9 +437,10 @@ public final class WfSearchRewrite {
     private String allocateDocumentInvoke(final DocumentRegistry.DocumentIndex entry,
                                           final ParsedUrl parsed,
                                           final String query,
-                                          final Map<String, String> projection) {
+                                          final Map<String, String> projection,
+                                          final boolean projectsSnippet) {
         final int limit = resolveLimit(parsed);
-        final String optsJson = buildOptsJson(parsed, limit);
+        final String optsJson = buildOptsJson(parsed, limit, projectsSnippet);
 
         final List<Node> args = new ArrayList<>(6);
         args.add(NodeFactory.createLiteralString(entry.searchBackend()));
@@ -455,13 +472,14 @@ public final class WfSearchRewrite {
     private String allocateFulltextInvoke(final FulltextRegistry.FulltextIndex entry,
                                           final ParsedUrl parsed,
                                           final String query,
-                                          final Map<String, String> projection) {
+                                          final Map<String, String> projection,
+                                          final boolean projectsSnippet) {
         // wf_fulltext guest's WIT `query-opts` record has two REQUIRED
         // fields: `fields: list<string>` and `highlight: bool`. Emit
         // both as defaults; without them the substrate's typed-arg
         // marshaller fails with "record missing required field
         // `fields`".
-        final String optsJson = buildFulltextOptsJson(parsed);
+        final String optsJson = buildFulltextOptsJson(parsed, projectsSnippet);
         final String[] be = splitFulltextOpts(entry);
         final String backendEndpoint = be[0];
         final String indexName = be[1];
@@ -480,14 +498,29 @@ public final class WfSearchRewrite {
     /**
      * Build JSON matching the wf_fulltext guest's {@code query-opts}
      * WIT record. {@code fields} and {@code highlight} are required.
+     *
+     * <p>{@code projectsSnippet} implements memo &sect;10: when the
+     * SERVICE body projects a variable through {@code wf:snippet}, the
+     * substrate defaults {@code highlight} to true so callers don't
+     * have to explicitly append {@code ?highlight=true} to the URL.
+     * An explicit URL opt still wins — the URL value is checked first
+     * and only when unset does the smart-set fall through.
      */
-    private static String buildFulltextOptsJson(final ParsedUrl parsed) {
+    private static String buildFulltextOptsJson(final ParsedUrl parsed,
+                                                final boolean projectsSnippet) {
         final StringBuilder sb = new StringBuilder();
         sb.append('{');
         sb.append("\"fields\":[]");
         sb.append(",\"highlight\":");
         final String hl = parsed.opts.get("highlight");
-        sb.append("true".equalsIgnoreCase(hl) || "1".equals(hl) ? "true" : "false");
+        final boolean highlight;
+        if (hl == null || hl.isEmpty()) {
+            // No URL opt — fall through to memo §10 smart-set.
+            highlight = projectsSnippet;
+        } else {
+            highlight = "true".equalsIgnoreCase(hl) || "1".equals(hl);
+        }
+        sb.append(highlight ? "true" : "false");
         // Optional fields — propagate whatever the caller supplied.
         appendIntIfPresent(sb, parsed.opts.get("limit"), "limit");
         appendIntIfPresent(sb, parsed.opts.get("offset"), "offset");
@@ -560,12 +593,18 @@ public final class WfSearchRewrite {
      * {@code at_time}/{@code at_rev} are mutually exclusive by the parser
      * (a URL that mixes them fails to parse).
      */
-    private static String buildOptsJson(final ParsedUrl parsed, final int limit) {
+    private static String buildOptsJson(final ParsedUrl parsed, final int limit,
+                                        final boolean projectsSnippet) {
         final StringBuilder sb = new StringBuilder();
         sb.append('{');
         sb.append("\"limit\":").append(limit);
         appendIntIfPresent(sb, parsed.opts.get("offset"), "offset");
-        appendBoolIfPresent(sb, parsed.opts.get("highlight"), "highlight");
+        // Memo §10 smart-set: SERVICE body projecting `wf:snippet`
+        // defaults `highlight` to true unless the URL opt already
+        // says otherwise. `appendBoolIfPresent` short-circuits on a
+        // null URL value, so the smart-set only fires when the URL
+        // opt is absent.
+        appendBoolWithDefault(sb, parsed.opts.get("highlight"), "highlight", projectsSnippet);
         appendStrIfPresent(sb, parsed.opts.get("lang"), "lang");
         appendStrIfPresent(sb, parsed.opts.get("filter"), "filter");
         appendBoolIfPresent(sb, parsed.opts.get("include_body"), "include_body");
@@ -579,6 +618,25 @@ public final class WfSearchRewrite {
         }
         sb.append('}');
         return sb.toString();
+    }
+
+    /**
+     * Emit a boolean opt with fallback semantics: the URL opt wins when
+     * present; otherwise the smart-set default is emitted only when
+     * true (memo §10 doesn't want to emit a spurious `highlight:false`
+     * on the document path when neither the URL nor the body says
+     * anything).
+     */
+    private static void appendBoolWithDefault(final StringBuilder sb, final String v,
+                                              final String key, final boolean smartSet) {
+        if (v != null && !v.isEmpty()) {
+            final boolean b = "true".equalsIgnoreCase(v) || "1".equals(v);
+            sb.append(",\"").append(key).append("\":").append(b);
+            return;
+        }
+        if (smartSet) {
+            sb.append(",\"").append(key).append("\":true");
+        }
     }
 
     private static void appendIntIfPresent(final StringBuilder sb, final String v, final String key) {

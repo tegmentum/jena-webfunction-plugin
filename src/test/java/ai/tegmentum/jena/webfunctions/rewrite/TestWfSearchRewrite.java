@@ -312,6 +312,78 @@ public class TestWfSearchRewrite {
         assertThat(inv.size()).isZero();
     }
 
+    // ---------------------------------------------------------------------
+    // Memo §10 smart-set: wf:snippet → highlight=true
+    // ---------------------------------------------------------------------
+
+    @Test
+    public void smartSetsHighlightWhenBodyProjectsSnippet() {
+        // SERVICE body binds `wf:snippet ?snippet`; URL doesn't touch
+        // highlight → memo §10 smart-set kicks in and the emitted opts
+        // JSON carries `"highlight":true`.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc ?snippet WHERE {\n"
+                + "  SERVICE <wf-search:manuals> {\n"
+                + "    ?_ wf:query \"waterproof\" ; wf:doc ?doc ; wf:snippet ?snippet .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(optsJsonArg(spec))
+                .as("wf:snippet in body must smart-set highlight=true")
+                .contains("\"highlight\":true");
+    }
+
+    @Test
+    public void noSmartSetWhenBodyOmitsSnippet() {
+        // No wf:snippet in the body → don't emit a highlight opt; the
+        // guest picks its own default.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc WHERE {\n"
+                + "  SERVICE <wf-search:manuals> {\n"
+                + "    ?_ wf:query \"waterproof\" ; wf:doc ?doc .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(optsJsonArg(spec))
+                .as("no wf:snippet must leave highlight unset")
+                .doesNotContain("\"highlight\"");
+    }
+
+    @Test
+    public void urlHighlightFalseWinsOverSnippetSmartSet() {
+        // URL explicitly says highlight=false; body still projects
+        // wf:snippet. URL wins per memo §10.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc ?snippet WHERE {\n"
+                + "  SERVICE <wf-search:manuals?highlight=false> {\n"
+                + "    ?_ wf:query \"waterproof\" ; wf:doc ?doc ; wf:snippet ?snippet .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(optsJsonArg(spec))
+                .as("URL ?highlight=false must win over smart-set")
+                .contains("\"highlight\":false")
+                .doesNotContain("\"highlight\":true");
+    }
+
     @Test
     public void emptyRegistryNoop() {
         final DocumentRegistry reg = DocumentRegistry.empty();
