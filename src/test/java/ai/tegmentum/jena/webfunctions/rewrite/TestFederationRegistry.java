@@ -1,6 +1,7 @@
 package ai.tegmentum.jena.webfunctions.rewrite;
 
 import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.FederationSource;
+import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.ProbeFn;
 import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.SourceType;
 
 import org.apache.jena.atlas.json.JSON;
@@ -9,6 +10,7 @@ import org.junit.Test;
 
 import java.util.List;
 import java.util.OptionalInt;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -244,5 +246,170 @@ public class TestFederationRegistry {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("duplicate name")
                 .hasMessageContaining("dup");
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.2 cost model
+    // ---------------------------------------------------------------------
+
+    /**
+     * Source-wide {@code cardinality_hint} parses and is applied to
+     * every predicate on that source when no per-predicate override is
+     * set (memo &sect;07).
+     */
+    @Test
+    public void cardinalityHintParsesAndSurvivesRoundtrip() {
+        final FederationRegistry reg = parse("""
+                {
+                  "sources": [{
+                    "name": "products",
+                    "type": "sparql",
+                    "endpoint": "http://ex/query",
+                    "predicates": ["http://ex/sku"],
+                    "cardinality_hint": 5000
+                  }]
+                }""");
+        final FederationSource e = reg.byName("products");
+        assertThat(e.cardinalityHint()).hasValue(5000L);
+        assertThat(e.cardinalityFor("http://ex/sku")).hasValue(5000L);
+        assertThat(e.cardinalityFor("http://ex/other")).hasValue(5000L);
+    }
+
+    /**
+     * Per-predicate cardinality hints override the source-wide default
+     * for the matched predicate; other predicates fall back to the
+     * source-wide value (memo &sect;07).
+     */
+    @Test
+    public void perPredicateCardinalityHintsOverrideSourceHint() {
+        final FederationRegistry reg = parse("""
+                {
+                  "sources": [{
+                    "name": "products",
+                    "type": "sparql",
+                    "endpoint": "http://ex/query",
+                    "predicates": ["http://ex/sku", "http://ex/label"],
+                    "cardinality_hint": 5000,
+                    "cardinality_hints": {"http://ex/sku": 100}
+                  }]
+                }""");
+        final FederationSource e = reg.byName("products");
+        assertThat(e.cardinalityFor("http://ex/sku")).hasValue(100L);
+        assertThat(e.cardinalityFor("http://ex/label")).hasValue(5000L);
+    }
+
+    /**
+     * Neither source-wide nor per-predicate hint set &rarr; empty
+     * {@code OptionalLong}. Callers treat this as "unknown, sort last".
+     */
+    @Test
+    public void cardinalityAbsentReturnsEmpty() {
+        final FederationRegistry reg = parse("""
+                {
+                  "sources": [{
+                    "name": "products",
+                    "type": "sparql",
+                    "endpoint": "http://ex/query",
+                    "predicates": ["http://ex/sku"]
+                  }]
+                }""");
+        assertThat(reg.byName("products").cardinalityFor("http://ex/sku")).isEmpty();
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.2 probe mode
+    // ---------------------------------------------------------------------
+
+    /**
+     * Root-level {@code probe_mode} + {@code probe_ttl_secs} parse into
+     * the corresponding registry accessors.
+     */
+    @Test
+    public void probeModeParsesFromJsonRoot() {
+        final FederationRegistry reg = parse("""
+                {
+                  "probe_mode": true,
+                  "probe_ttl_secs": 300,
+                  "sources": [{
+                    "name": "s", "type": "sparql", "endpoint": "http://ex"
+                  }]
+                }""");
+        assertThat(reg.probeMode()).isTrue();
+        assertThat(reg.probeTtlSecs()).isEqualTo(300L);
+    }
+
+    /**
+     * Second probe within the TTL hits the cache and skips a re-probe
+     * &mdash; observable by counting invocations on the injected
+     * {@link ProbeFn}.
+     */
+    @Test
+    public void probeCacheHitAvoidsReprobe() throws Exception {
+        final AtomicInteger calls = new AtomicInteger();
+        final FederationRegistry reg = parse("""
+                {
+                  "probe_mode": true,
+                  "sources": [{
+                    "name": "s", "type": "sparql", "endpoint": "http://ex/query"
+                  }]
+                }""")
+                .withProbeFn((src, pred) -> {
+                    calls.incrementAndGet();
+                    return true;
+                });
+        final FederationSource s = reg.byName("s");
+        assertThat(reg.probePredicate(s, "http://ex/p")).isTrue();
+        assertThat(reg.probePredicate(s, "http://ex/p")).isTrue();
+        assertThat(calls.get()).as("cache hit must skip re-probe").isEqualTo(1);
+    }
+
+    /**
+     * With a 0-second TTL every lookup is stale &mdash; the second
+     * call, taken past a small sleep, must re-probe.
+     */
+    @Test
+    public void probeCacheTtlExpiryReprobes() throws Exception {
+        final AtomicInteger calls = new AtomicInteger();
+        final FederationRegistry reg = parse("""
+                {
+                  "probe_mode": true,
+                  "probe_ttl_secs": 0,
+                  "sources": [{
+                    "name": "s", "type": "sparql", "endpoint": "http://ex/query"
+                  }]
+                }""")
+                .withProbeFn((src, pred) -> {
+                    calls.incrementAndGet();
+                    return true;
+                });
+        final FederationSource s = reg.byName("s");
+        reg.probePredicate(s, "http://ex/p");
+        // Sleep past the 0-second TTL so elapsed > 0 triggers re-probe.
+        Thread.sleep(5);
+        reg.probePredicate(s, "http://ex/p");
+        assertThat(calls.get()).as("TTL expiry must trigger re-probe").isEqualTo(2);
+    }
+
+    /**
+     * A probe function that throws surfaces the error to the caller of
+     * {@link FederationRegistry#probePredicate}; the higher-level
+     * {@link FederationRegistry#findByPredicateProbing} swallows and
+     * logs, but the low-level entry point does not.
+     */
+    @Test
+    public void probeEndpointDownSurfacesError() {
+        final FederationRegistry reg = parse("""
+                {
+                  "probe_mode": true,
+                  "sources": [{
+                    "name": "s", "type": "sparql", "endpoint": "http://ex/query"
+                  }]
+                }""")
+                .withProbeFn((src, pred) -> {
+                    throw new RuntimeException("connection refused");
+                });
+        final FederationSource s = reg.byName("s");
+        assertThatThrownBy(() -> reg.probePredicate(s, "http://ex/p"))
+                .hasMessageContaining("connection refused");
     }
 }

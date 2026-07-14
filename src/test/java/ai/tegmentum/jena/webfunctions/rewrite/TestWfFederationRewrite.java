@@ -18,8 +18,10 @@ import org.junit.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -523,6 +525,111 @@ public class TestWfFederationRewrite {
         assertThat(svc.getSilent())
                 .as("wf-search sources default to non-SILENT when `silent` is omitted")
                 .isFalse();
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.2 cost model &mdash; cardinality-based SERVICE reorder
+    // ---------------------------------------------------------------------
+
+    private static int positionOfServiceUri(final Op op, final String uri) {
+        final List<OpService> services = collectServices(op);
+        for (int i = 0; i < services.size(); i++) {
+            if (uri.equals(services.get(i).getService().getURI())) return i;
+        }
+        return -1;
+    }
+
+    /**
+     * With cardinality hints, sources sort smallest-first regardless of
+     * alphabetical order. {@code zebra} (100) beats {@code alpha}
+     * (5000) even though it sorts later by name.
+     */
+    @Test
+    public void cardinalityReordersSmallerFirst() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                new FederationSource("alpha", SourceType.SPARQL, "http://alpha/q",
+                        List.of("http://ex/a"), OptionalInt.empty(),
+                        Optional.empty(), OptionalLong.of(5000L), Map.of()),
+                new FederationSource("zebra", SourceType.SPARQL, "http://zebra/q",
+                        List.of("http://ex/z"), OptionalInt.empty(),
+                        Optional.empty(), OptionalLong.of(100L), Map.of())));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?s ?a ?z WHERE {
+                  ?s ex:a ?a . ?s ex:z ?z .
+                }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final int zebraPos = positionOfServiceUri(out, "http://zebra/q");
+        final int alphaPos = positionOfServiceUri(out, "http://alpha/q");
+        assertThat(zebraPos).isGreaterThanOrEqualTo(0);
+        assertThat(alphaPos).isGreaterThanOrEqualTo(0);
+        assertThat(zebraPos)
+                .as("zebra (100 rows) must precede alpha (5000 rows)")
+                .isLessThan(alphaPos);
+    }
+
+    /**
+     * Unknown-cardinality sources sort last (Long.MAX_VALUE default).
+     */
+    @Test
+    public void unknownCardinalitySortsLast() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                new FederationSource("known", SourceType.SPARQL, "http://known/q",
+                        List.of("http://ex/k"), OptionalInt.empty(),
+                        Optional.empty(), OptionalLong.of(200L), Map.of()),
+                new FederationSource("unknown", SourceType.SPARQL, "http://unknown/q",
+                        List.of("http://ex/u"), OptionalInt.empty(),
+                        Optional.empty(), OptionalLong.empty(), Map.of())));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?s ?k ?u WHERE {
+                  ?s ex:k ?k . ?s ex:u ?u .
+                }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final int knownPos = positionOfServiceUri(out, "http://known/q");
+        final int unknownPos = positionOfServiceUri(out, "http://unknown/q");
+        assertThat(knownPos).isGreaterThanOrEqualTo(0);
+        assertThat(unknownPos).isGreaterThanOrEqualTo(0);
+        assertThat(knownPos)
+                .as("known-card source must precede unknown-card source")
+                .isLessThan(unknownPos);
+    }
+
+    /**
+     * Per-predicate hints override source-wide hints for the assigned
+     * predicate. Source {@code a} has source-wide 5000 but per-predicate
+     * override 10 for {@code ex:cheap}; source {@code b} has 100 flat.
+     * {@code a} should win on {@code ex:cheap}.
+     */
+    @Test
+    public void perPredicateCardinalityWins() {
+        final FederationRegistry reg = FederationRegistry.of(List.of(
+                new FederationSource("a", SourceType.SPARQL, "http://a/q",
+                        List.of("http://ex/cheap"), OptionalInt.empty(),
+                        Optional.empty(), OptionalLong.of(5000L),
+                        Map.of("http://ex/cheap", 10L)),
+                new FederationSource("b", SourceType.SPARQL, "http://b/q",
+                        List.of("http://ex/mid"), OptionalInt.empty(),
+                        Optional.empty(), OptionalLong.of(100L), Map.of())));
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra("""
+                PREFIX ex: <http://ex/>
+                SELECT ?s ?c ?m WHERE {
+                  ?s ex:cheap ?c . ?s ex:mid ?m .
+                }""");
+        final Op out = WfFederationRewrite.rewrite(input, reg, inv);
+
+        final int aPos = positionOfServiceUri(out, "http://a/q");
+        final int bPos = positionOfServiceUri(out, "http://b/q");
+        assertThat(aPos).isGreaterThanOrEqualTo(0);
+        assertThat(bPos).isGreaterThanOrEqualTo(0);
+        assertThat(aPos)
+                .as("a (per-pred 10) must precede b (100)")
+                .isLessThan(bPos);
     }
 
     @Test

@@ -21,9 +21,11 @@ import org.apache.jena.sparql.expr.Expr;
 import org.apache.jena.sparql.expr.ExprList;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 
 /**
@@ -162,8 +164,19 @@ public final class WfFederationRewrite {
         if (triples.isEmpty()) return opBGP;
         final int n = triples.size();
 
-        // Step 2: source assignment per triple.
+        // Step 2: source assignment per triple. v0.2 uses
+        // findByPredicateProbing so probe-mode registries get their
+        // ASK-augmented view; static-only registries fall through to
+        // identical behavior (no probes issued).
+        //
+        // Per-source min cardinality tracker: for each source name we
+        // record the minimum cardinality observed across every triple
+        // assigned to that source. Sorting the emitted SERVICE groups
+        // by this value implements the memo §04 step 4 rule ("smaller
+        // first"); unknown-cardinality sources sort last via
+        // Long.MAX_VALUE default.
         final List<List<FederationSource>> assignments = new ArrayList<>(n);
+        final Map<String, Long> sourceMinCard = new HashMap<>();
         boolean anyAssigned = false;
         for (Triple t : triples) {
             final Node p = t.getPredicate();
@@ -171,9 +184,18 @@ public final class WfFederationRewrite {
                 assignments.add(List.of());
                 continue;
             }
-            final List<FederationSource> sources = registry.findByPredicate(p.getURI());
+            final String predIri = p.getURI();
+            final List<FederationSource> sources = registry.findByPredicateProbing(predIri);
             assignments.add(sources);
-            if (!sources.isEmpty()) anyAssigned = true;
+            if (!sources.isEmpty()) {
+                anyAssigned = true;
+                for (FederationSource src : sources) {
+                    final OptionalLong c = src.cardinalityFor(predIri);
+                    if (c.isPresent()) {
+                        sourceMinCard.merge(src.name(), c.getAsLong(), Long::min);
+                    }
+                }
+            }
         }
         if (!anyAssigned) return opBGP;
 
@@ -215,8 +237,25 @@ public final class WfFederationRewrite {
 
         final List<Op> parts = new ArrayList<>();
 
-        // Same-source groups → one SERVICE per group.
-        for (List<Integer> group : groups.values()) {
+        // v0.2 cost model: sort emitted SERVICE groups by estimated
+        // cardinality (smaller first), tie-breaking on source name and
+        // then first-triple-index for determinism. Sources without a
+        // hint get Long.MAX_VALUE so they sort last.
+        final List<List<Integer>> sortedGroups = new ArrayList<>(groups.values());
+        sortedGroups.sort((g1, g2) -> {
+            final FederationSource s1 = assignments.get(g1.get(0)).get(0);
+            final FederationSource s2 = assignments.get(g2.get(0)).get(0);
+            final long c1 = sourceMinCard.getOrDefault(s1.name(), Long.MAX_VALUE);
+            final long c2 = sourceMinCard.getOrDefault(s2.name(), Long.MAX_VALUE);
+            int cmp = Long.compare(c1, c2);
+            if (cmp != 0) return cmp;
+            cmp = s1.name().compareTo(s2.name());
+            if (cmp != 0) return cmp;
+            return Integer.compare(g1.get(0), g2.get(0));
+        });
+
+        // Same-source groups → one SERVICE per group (cardinality order).
+        for (List<Integer> group : sortedGroups) {
             final FederationSource src = assignments.get(group.get(0)).get(0);
             final BasicPattern bp = new BasicPattern();
             for (int idx : group) bp.add(triples.get(idx));

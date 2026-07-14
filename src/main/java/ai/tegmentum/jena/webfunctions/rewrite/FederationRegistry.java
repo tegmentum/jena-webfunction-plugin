@@ -7,19 +7,24 @@ import org.apache.jena.atlas.json.JsonValue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.Set;
 
 /**
  * Planner-side catalog of federated SPARQL / substrate sources.
- * Consulted by {@link WfFederationRewrite} during the static-mode
- * federation pass (design memo &sect;03 and &sect;04 of
+ * Consulted by {@link WfFederationRewrite} during the federation pass
+ * (design memo &sect;03 and &sect;04 of
  * {@code wf-conformance/docs/design/wf-federation.md}).
  *
  * <p>Each entry names one federatable source together with its
@@ -36,15 +41,30 @@ import java.util.OptionalInt;
  *       then expands it into a {@code wf-invoke:} dispatch.</li>
  * </ul>
  *
- * <p>v0.1 is static-only (memo &sect;11 step 1): predicates are declared
- * in the config file, no ASK probes at plan time. {@code probe_ttl_secs}
- * is parsed and preserved for the v0.2 probe path but ignored by the
- * v0.1 rewrite.
+ * <p>v0.2 additions (design memo &sect;02 probe mode, &sect;07 cost
+ * model):
  *
- * <p>Read-only after load; an empty registry (no config flag) is a
- * valid state and is what {@link WfFederationRewrite} treats as an
- * unconditional no-op. Identical lifecycle to {@link FulltextRegistry}
- * and {@link DocumentRegistry}.
+ * <ul>
+ *   <li>{@link #probeMode()} &mdash; flip the pass into ASK-probe
+ *       discovery. On top of declared-predicate lookup, the pass asks
+ *       every registered source whether it covers a predicate via
+ *       {@code ASK { ?s <p> ?o }}.</li>
+ *   <li>{@link #probeTtlSecs()} &mdash; registry-wide default TTL for
+ *       the probe cache. Per-source
+ *       {@link FederationSource#probeTtlSecs()} overrides this default.</li>
+ *   <li>{@link #probeCache()} &mdash; in-memory
+ *       {@code (source, predicate) -> (bool, when)} cache. Populated on
+ *       the first probe, consulted by later plans within the TTL window.</li>
+ *   <li>Cost model plumbing lives on {@link FederationSource} itself
+ *       ({@code cardinalityHint} / {@code cardinalityHints}); the
+ *       registry just preserves and returns them.</li>
+ * </ul>
+ *
+ * <p>Read-only after load (except for the probe cache and injected probe
+ * function, which are mutable by design); an empty registry (no config
+ * flag) is a valid state and is what {@link WfFederationRewrite} treats
+ * as an unconditional no-op. Identical lifecycle to
+ * {@link FulltextRegistry} and {@link DocumentRegistry}.
  */
 public final class FederationRegistry {
 
@@ -108,9 +128,37 @@ public final class FederationRegistry {
      */
     private final Map<String, List<Integer>> predicateToIndices;
 
+    /**
+     * v0.2 probe-mode toggle. When true,
+     * {@link #findByPredicateProbing(String)} consults the probe cache
+     * (and issues fresh ASK queries when the cache is cold) in addition
+     * to the static predicate index.
+     */
+    private boolean probeMode;
+    /**
+     * Registry-wide default probe TTL, in seconds. Per-source
+     * {@link FederationSource#probeTtlSecs()} overrides this when set.
+     */
+    private long probeTtlSecs;
+    /**
+     * Per-registry probe cache. Shared across plans on the same server
+     * process so probes populated by an earlier query show up in later
+     * ones within the TTL window.
+     */
+    private final ProbeCache probeCache;
+    /**
+     * Injectable probe function &mdash; tests pass a mock without
+     * spinning up an HTTP listener; production wires an ASK-based probe.
+     * When {@code null}, {@link #probePredicate} throws
+     * {@link IllegalStateException}.
+     */
+    private ProbeFn probeFn;
+
     private FederationRegistry(final List<FederationSource> sources,
                                final Map<String, Integer> nameToIndex,
-                               final Map<String, List<Integer>> predicateToIndices) {
+                               final Map<String, List<Integer>> predicateToIndices,
+                               final boolean probeMode,
+                               final long probeTtlSecs) {
         this.sources = List.copyOf(sources);
         this.nameToIndex = Map.copyOf(nameToIndex);
         // Freeze inner lists so consumers can't mutate the reverse index.
@@ -119,6 +167,10 @@ public final class FederationRegistry {
             frozen.put(e.getKey(), List.copyOf(e.getValue()));
         }
         this.predicateToIndices = Map.copyOf(frozen);
+        this.probeMode = probeMode;
+        this.probeTtlSecs = probeTtlSecs;
+        this.probeCache = new ProbeCache();
+        this.probeFn = null;
     }
 
     /**
@@ -126,7 +178,7 @@ public final class FederationRegistry {
      * lookup is a no-op; {@link #isEmpty()} returns true.
      */
     public static FederationRegistry empty() {
-        return new FederationRegistry(List.of(), Map.of(), Map.of());
+        return new FederationRegistry(List.of(), Map.of(), Map.of(), false, 3600L);
     }
 
     public boolean isEmpty() { return sources.isEmpty(); }
@@ -159,6 +211,99 @@ public final class FederationRegistry {
         return Collections.unmodifiableList(out);
     }
 
+    /** v0.2 probe-mode toggle accessor. */
+    public boolean probeMode() { return probeMode; }
+
+    /** v0.2 registry-wide default TTL in seconds. */
+    public long probeTtlSecs() { return probeTtlSecs; }
+
+    /**
+     * The shared probe cache. Callers that want to warm the cache
+     * ahead of a batch of plans (or to inspect it in tests) borrow it
+     * here.
+     */
+    public ProbeCache probeCache() { return probeCache; }
+
+    /**
+     * Install a probe function. Chained builder &mdash; production
+     * wires an ASK-based probe at server startup; tests wire a mock.
+     * Returns {@code this} for fluent chaining.
+     */
+    public FederationRegistry withProbeFn(final ProbeFn fn) {
+        this.probeFn = fn;
+        return this;
+    }
+
+    /**
+     * Turn probe mode on or off manually (usually flipped from JSON via
+     * {@code probe_mode: true}; this accessor is for programmatic
+     * construction e.g. in unit tests). Returns {@code this} for fluent
+     * chaining.
+     */
+    public FederationRegistry withProbeMode(final boolean on) {
+        this.probeMode = on;
+        return this;
+    }
+
+    /**
+     * v0.2 probe entry point &mdash; check whether {@code source}
+     * covers {@code predicateIri}. Consults the cache first (with the
+     * per-source TTL when set, else the registry-wide default); on miss
+     * issues an ASK query via the injected probe function and caches
+     * the result. Throws when the probe function is unset or when the
+     * probe itself fails (transport/protocol failure) &mdash; callers
+     * should treat a thrown exception as "skip this source for this
+     * plan" per memo &sect;04.
+     */
+    public boolean probePredicate(final FederationSource source,
+                                  final String predicateIri) throws Exception {
+        final Duration ttl = source.probeTtlSecs().isPresent()
+                ? Duration.ofSeconds(source.probeTtlSecs().getAsInt())
+                : Duration.ofSeconds(probeTtlSecs);
+        final Optional<Boolean> hit = probeCache.get(source.name(), predicateIri, ttl);
+        if (hit.isPresent()) {
+            return hit.get();
+        }
+        if (probeFn == null) {
+            throw new IllegalStateException("no probe function configured");
+        }
+        final boolean has = probeFn.probe(source, predicateIri);
+        probeCache.put(source.name(), predicateIri, has);
+        return has;
+    }
+
+    /**
+     * v0.2 probe-mode augmented find. Same shape as
+     * {@link #findByPredicate(String)} (statically-declared coverage),
+     * and when {@link #probeMode()} is on also asks every registered
+     * source without declared coverage via ASK probes. Silently drops
+     * sources whose probe fails (endpoint down / auth) &mdash; memo
+     * &sect;04 skip-and-log.
+     */
+    public List<FederationSource> findByPredicateProbing(final String predicateIri) {
+        final List<FederationSource> hits = new ArrayList<>(findByPredicate(predicateIri));
+        if (!probeMode) {
+            return Collections.unmodifiableList(hits);
+        }
+        final Set<String> already = new HashSet<>();
+        for (FederationSource s : hits) already.add(s.name());
+        for (FederationSource entry : sources) {
+            if (already.contains(entry.name())) continue;
+            try {
+                if (probePredicate(entry, predicateIri)) {
+                    hits.add(entry);
+                }
+            } catch (Exception e) {
+                // Probe failure: skip this source for this plan (memo
+                // §04). Log at stderr so operators can trace flap
+                // patterns without the log flooding.
+                System.err.println("wf_federation probe: source `" + entry.name()
+                        + "` predicate `" + predicateIri + "` failed: " + e.getMessage());
+            }
+        }
+        return Collections.unmodifiableList(hits);
+    }
+
     /**
      * Build a registry from in-memory sources. Convenient for tests and
      * non-JSON loaders. Duplicate {@link FederationSource#name() names}
@@ -182,7 +327,7 @@ public final class FederationRegistry {
             }
             list.add(s);
         }
-        return new FederationRegistry(list, nameToIndex, predIndex);
+        return new FederationRegistry(list, nameToIndex, predIndex, false, 3600L);
     }
 
     /**
@@ -219,7 +364,29 @@ public final class FederationRegistry {
                 }
             }
         }
-        return of(parsed);
+        final boolean probeMode;
+        if (hasNonNull(root, "probe_mode")) {
+            final JsonValue node = root.get("probe_mode");
+            if (!node.isBoolean()) {
+                throw new IllegalArgumentException(
+                        "federation registry: `probe_mode` must be a boolean");
+            }
+            probeMode = node.getAsBoolean().value();
+        } else {
+            probeMode = false;
+        }
+        final long probeTtlSecs;
+        if (hasNonNull(root, "probe_ttl_secs")) {
+            probeTtlSecs = root.get("probe_ttl_secs").getAsNumber().value().longValue();
+        } else {
+            probeTtlSecs = 3600L;
+        }
+        // Reuse `of()` for the source-side validation, then apply
+        // probe-mode fields.
+        final FederationRegistry base = of(parsed);
+        base.probeMode = probeMode;
+        base.probeTtlSecs = probeTtlSecs;
+        return base;
     }
 
     private static FederationSource parseSource(final JsonObject raw) {
@@ -274,7 +441,34 @@ public final class FederationRegistry {
             silent = Optional.empty();
         }
 
-        return new FederationSource(name, type, endpoint, predicates, probeTtl, silent);
+        final OptionalLong cardinalityHint;
+        if (hasNonNull(raw, "cardinality_hint")) {
+            cardinalityHint = OptionalLong.of(
+                    raw.get("cardinality_hint").getAsNumber().value().longValue());
+        } else {
+            cardinalityHint = OptionalLong.empty();
+        }
+
+        final Map<String, Long> cardinalityHints;
+        if (hasNonNull(raw, "cardinality_hints")) {
+            final JsonValue node = raw.get("cardinality_hints");
+            if (!node.isObject()) {
+                throw new IllegalArgumentException(
+                        "federation registry source `" + name
+                                + "`: `cardinality_hints` must be an object");
+            }
+            final Map<String, Long> hints = new LinkedHashMap<>();
+            final JsonObject obj = node.getAsObject();
+            for (String key : obj.keys()) {
+                hints.put(key, obj.get(key).getAsNumber().value().longValue());
+            }
+            cardinalityHints = hints;
+        } else {
+            cardinalityHints = Map.of();
+        }
+
+        return new FederationSource(name, type, endpoint, predicates, probeTtl,
+                silent, cardinalityHint, cardinalityHints);
     }
 
     private static SourceType parseType(final String name, final String typeStr) {
@@ -302,6 +496,84 @@ public final class FederationRegistry {
         return v != null && !v.isNull();
     }
 
+    // ---------------------------------------------------------------------
+    // v0.2 Probe mode &mdash; ASK-cache discovery of predicate coverage.
+    //
+    // Design memo §02 (two modes: static / probe), §10 (v0.2 wire the
+    // COUNT-star + ASK probes). When probeMode is true on the registry,
+    // a predicate that no source statically declares gets tested per
+    // source via `ASK { ?s <predicate> ?o }`. Positive results extend
+    // the find-by-predicate view for the plan; results cache per
+    // (source, predicate) with a TTL so subsequent plans within the
+    // window skip the round-trip.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Injectable probe function. Given {@code (source, predicate)},
+     * returns whether the source covers the predicate. Throws to signal
+     * transport/protocol failure &mdash; the rewrite pass treats a
+     * thrown exception as "skip this source for this plan" per memo
+     * &sect;04 (probe-error &rarr; conservative skip).
+     */
+    @FunctionalInterface
+    public interface ProbeFn {
+        boolean probe(FederationSource src, String predicateIri) throws Exception;
+    }
+
+    /** Composite key for the probe cache. */
+    public record CacheKey(String source, String predicate) {}
+
+    /** Cached probe result plus timestamp for TTL comparison. */
+    public record CacheEntry(boolean hasIt, Instant when) {}
+
+    /**
+     * Per-registry probe cache. Keyed by {@code (source, predicate)};
+     * value carries the observed boolean plus the {@link Instant} of
+     * observation. TTL is applied on read via
+     * {@link #get(String, String, Duration)}. Wrapped in a lock &mdash;
+     * probe checks are rare compared to plan-time reads, so contention
+     * is a non-issue.
+     */
+    public static final class ProbeCache {
+        private final Map<CacheKey, CacheEntry> entries = new HashMap<>();
+        private final Object lock = new Object();
+
+        /**
+         * Cache lookup &mdash; returns a present {@code Optional<Boolean>}
+         * when a non-expired entry exists; empty when absent or expired
+         * (caller re-probes).
+         */
+        public Optional<Boolean> get(final String source, final String predicate,
+                                     final Duration ttl) {
+            synchronized (lock) {
+                final CacheEntry e = entries.get(new CacheKey(source, predicate));
+                if (e == null) return Optional.empty();
+                if (Duration.between(e.when(), Instant.now()).compareTo(ttl) > 0) {
+                    return Optional.empty();
+                }
+                return Optional.of(e.hasIt());
+            }
+        }
+
+        /**
+         * Store a probe result. Callers should hold this across the
+         * plan so subsequent identical probes within the TTL avoid the
+         * round-trip.
+         */
+        public void put(final String source, final String predicate, final boolean has) {
+            synchronized (lock) {
+                entries.put(new CacheKey(source, predicate), new CacheEntry(has, Instant.now()));
+            }
+        }
+
+        /** Total entry count after any expiries &mdash; test helper. */
+        public int size() {
+            synchronized (lock) {
+                return entries.size();
+            }
+        }
+    }
+
     /**
      * One registered federated source. Mirrors the JSON shape declared
      * in &sect;03 of the design memo.
@@ -313,19 +585,37 @@ public final class FederationRegistry {
         private final List<String> predicates;
         private final OptionalInt probeTtlSecs;
         private final Optional<Boolean> silent;
+        private final OptionalLong cardinalityHint;
+        private final Map<String, Long> cardinalityHints;
 
         /**
-         * Legacy four-field constructor kept for callers that don't need
-         * to specify a silent override. Delegates with
-         * {@link Optional#empty()} so the rewrite pass falls back to the
-         * per-source-type default (memo &sect;08).
+         * Legacy five-arg constructor kept for callers that don't need
+         * to specify a silent override or cardinality hints. Delegates
+         * to the full constructor with {@link Optional#empty()} /
+         * empty defaults.
          */
         public FederationSource(final String name,
                                 final SourceType sourceType,
                                 final String endpoint,
                                 final List<String> predicates,
                                 final OptionalInt probeTtlSecs) {
-            this(name, sourceType, endpoint, predicates, probeTtlSecs, Optional.empty());
+            this(name, sourceType, endpoint, predicates, probeTtlSecs,
+                    Optional.empty(), OptionalLong.empty(), Map.of());
+        }
+
+        /**
+         * Legacy six-arg constructor kept for callers that specify a
+         * silent override but no cardinality hints. Delegates to the
+         * full constructor with empty cardinality defaults.
+         */
+        public FederationSource(final String name,
+                                final SourceType sourceType,
+                                final String endpoint,
+                                final List<String> predicates,
+                                final OptionalInt probeTtlSecs,
+                                final Optional<Boolean> silent) {
+            this(name, sourceType, endpoint, predicates, probeTtlSecs,
+                    silent, OptionalLong.empty(), Map.of());
         }
 
         public FederationSource(final String name,
@@ -333,13 +623,17 @@ public final class FederationRegistry {
                                 final String endpoint,
                                 final List<String> predicates,
                                 final OptionalInt probeTtlSecs,
-                                final Optional<Boolean> silent) {
+                                final Optional<Boolean> silent,
+                                final OptionalLong cardinalityHint,
+                                final Map<String, Long> cardinalityHints) {
             this.name = name;
             this.sourceType = sourceType;
             this.endpoint = endpoint;
             this.predicates = List.copyOf(predicates);
             this.probeTtlSecs = probeTtlSecs;
             this.silent = silent;
+            this.cardinalityHint = cardinalityHint;
+            this.cardinalityHints = Map.copyOf(cardinalityHints);
         }
 
         public String name()              { return name; }
@@ -354,10 +648,9 @@ public final class FederationRegistry {
         public String endpoint()          { return endpoint; }
         public List<String> predicates()  { return predicates; }
         /**
-         * v0.2 ASK-probe cache TTL. {@link OptionalInt#empty()} at v0.1
-         * because probe mode isn't wired up; the field is preserved so
-         * operators can pre-populate configs for v0.2 without a schema
-         * migration.
+         * v0.2 ASK-probe cache TTL. {@link OptionalInt#empty()} means
+         * "use the registry-wide default" &mdash; see
+         * {@link FederationRegistry#probeTtlSecs()}.
          */
         public OptionalInt probeTtlSecs() { return probeTtlSecs; }
         /**
@@ -372,5 +665,32 @@ public final class FederationRegistry {
          * See design memo &sect;08 for the resolution rule.
          */
         public Optional<Boolean> silent() { return silent; }
+        /**
+         * v0.2 cost model &mdash; source-wide cardinality hint
+         * (approximate row count the source is expected to return per
+         * pattern). {@link OptionalLong#empty()} means "unknown"
+         * and unknown-cardinality sources sort last in the rewrite
+         * pass. Per-predicate hints in {@link #cardinalityHints()} win
+         * over this source-wide value when they match.
+         */
+        public OptionalLong cardinalityHint() { return cardinalityHint; }
+        /**
+         * v0.2 cost model &mdash; per-predicate cardinality hints. The
+         * rewrite pass consults this map before falling back to
+         * {@link #cardinalityHint()}. Keys are predicate IRIs.
+         */
+        public Map<String, Long> cardinalityHints() { return cardinalityHints; }
+
+        /**
+         * v0.2 cost model &mdash; best cardinality estimate for
+         * {@code predicateIri} on this source. Per-predicate hint wins
+         * over source-wide hint. Returns empty when neither is set
+         * &mdash; callers treat that as "unknown, sort last".
+         */
+        public OptionalLong cardinalityFor(final String predicateIri) {
+            final Long perPred = cardinalityHints.get(predicateIri);
+            if (perPred != null) return OptionalLong.of(perPred);
+            return cardinalityHint;
+        }
     }
 }
