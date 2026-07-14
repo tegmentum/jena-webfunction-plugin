@@ -501,6 +501,26 @@ public final class WfSearchRewrite {
     // Opts JSON + InvokeSpec allocation
     // ---------------------------------------------------------------------
 
+    /**
+     * Allocate an {@code InvokeSpec} for the wf_document guest. Arg
+     * positions match the {@code search} export as declared in
+     * {@code wf-document.wit} (world {@code document}, v1.3):
+     *
+     * <ol start="0">
+     *   <li>{@code search_backend} — Manticore endpoint from the entry.</li>
+     *   <li>{@code storage_backend} — sirix-sql-server endpoint.</li>
+     *   <li>{@code index} — Manticore-side table name (entry's
+     *       {@code search_index}).</li>
+     *   <li>{@code query} — search string from the SERVICE body's
+     *       {@code wf:query "…"} triple.</li>
+     *   <li>{@code opts_json} — URL opts (highlight, lang, filter,
+     *       offset, include_body, limit) merged with
+     *       {@code at_time}/{@code at_rev} from the URL time-spec.
+     *       {@code limit} lives inside this record per the WIT
+     *       ({@code search-opts.limit: option<u32>}); a default is
+     *       always emitted by {@link #buildOptsJson}.</li>
+     * </ol>
+     */
     private String allocateDocumentInvoke(final DocumentRegistry.DocumentIndex entry,
                                           final ParsedUrl parsed,
                                           final String query,
@@ -509,12 +529,11 @@ public final class WfSearchRewrite {
         final int limit = resolveLimit(parsed);
         final String optsJson = buildOptsJson(parsed, limit, projectsSnippet);
 
-        final List<Node> args = new ArrayList<>(6);
+        final List<Node> args = new ArrayList<>(5);
         args.add(NodeFactory.createLiteralString(entry.searchBackend()));
         args.add(NodeFactory.createLiteralString(entry.storageBackend()));
         args.add(NodeFactory.createLiteralString(entry.searchIndex()));
         args.add(NodeFactory.createLiteralString(query));
-        args.add(NodeFactory.createLiteralString(Integer.toString(limit)));
         args.add(NodeFactory.createLiteralString(optsJson));
 
         final long id = invokes.insert(

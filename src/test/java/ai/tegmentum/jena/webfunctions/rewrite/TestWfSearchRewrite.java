@@ -90,8 +90,10 @@ public class TestWfSearchRewrite {
     }
 
     private static String optsJsonArg(final InvokeRegistry.InvokeSpec spec) {
-        // args = [searchBackend, storageBackend, index, query, limit, optsJson]
-        return spec.args.get(5).getLiteralLexicalForm();
+        // args = [searchBackend, storageBackend, index, query, optsJson]
+        // per the wf_document `search` export WIT signature. `limit`
+        // lives inside optsJson (search-opts.limit: option<u32>).
+        return spec.args.get(4).getLiteralLexicalForm();
     }
 
     // ---------------------------------------------------------------------
@@ -207,12 +209,13 @@ public class TestWfSearchRewrite {
         final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
         assertThat(spec.entryPoint).isEqualTo("search");
         assertThat(spec.wasmUrl).isEqualTo("file:///opt/wf_document.wasm");
-        assertThat(spec.args).hasSize(6);
+        assertThat(spec.args).hasSize(5);
         assertThat(spec.args.get(0).getLiteralLexicalForm()).isEqualTo("http://localhost:9308");
         assertThat(spec.args.get(1).getLiteralLexicalForm()).isEqualTo("http://localhost:8080");
         assertThat(spec.args.get(2).getLiteralLexicalForm()).isEqualTo("manuals");
         assertThat(spec.args.get(3).getLiteralLexicalForm()).isEqualTo("waterproof");
-        assertThat(spec.args.get(4).getLiteralLexicalForm()).isEqualTo("20"); // default limit
+        // limit lives inside opts_json per the WIT record shape.
+        assertThat(optsJsonArg(spec)).contains("\"limit\":20");
         assertThat(optsJsonArg(spec)).doesNotContain("at_time");
         assertThat(optsJsonArg(spec)).doesNotContain("at_rev");
     }
@@ -577,7 +580,7 @@ public class TestWfSearchRewrite {
                 .isEqualTo("file:///opt/wf_document.wasm");
         assertThat(spec.args)
                 .as("wf_document ABI expected, not wf_fulltext")
-                .hasSize(6);
+                .hasSize(5);
     }
 
     @Test
