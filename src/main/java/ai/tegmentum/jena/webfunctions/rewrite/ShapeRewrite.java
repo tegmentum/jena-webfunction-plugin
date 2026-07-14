@@ -7,6 +7,7 @@ import org.apache.jena.sparql.algebra.Op;
 import org.apache.jena.sparql.algebra.TransformCopy;
 import org.apache.jena.sparql.algebra.Transformer;
 import org.apache.jena.sparql.algebra.op.OpBGP;
+import org.apache.jena.sparql.algebra.op.OpGraph;
 import org.apache.jena.sparql.algebra.op.OpService;
 import org.apache.jena.sparql.core.BasicPattern;
 import org.apache.jena.sparql.core.Var;
@@ -79,6 +80,26 @@ public final class ShapeRewrite {
         public Op transform(final OpBGP opBGP) {
             final Op rewritten = tryRewriteBgp(opBGP.getPattern());
             return rewritten == null ? super.transform(opBGP) : rewritten;
+        }
+
+        /**
+         * Do NOT descend into `GRAPH ?g { ... }` clauses. Rewriting the
+         * inner BGP would replace it with {@code SERVICE <wf:call>},
+         * whose result rows carry no named-graph provenance — the sink
+         * is a SQLite side-channel, not a named graph. SPARQL 1.1
+         * evaluation of {@code Graph} iterates over the dataset's
+         * named graphs and binds {@code ?g} from that iteration; the
+         * SERVICE has nothing to contribute. Leave shape-covered BGPs
+         * inside GRAPH alone so store semantics apply (see
+         * wf-conformance graph_shape_interaction.toml).
+         *
+         * <p>Returning the OpGraph as-is (instead of calling
+         * {@code super.transform}, which would recurse into the
+         * subOp) stops the shape pass from firing under GRAPH.
+         */
+        @Override
+        public Op transform(final OpGraph opGraph, final Op subOp) {
+            return opGraph;
         }
 
         private Op tryRewriteBgp(final BasicPattern pattern) {
