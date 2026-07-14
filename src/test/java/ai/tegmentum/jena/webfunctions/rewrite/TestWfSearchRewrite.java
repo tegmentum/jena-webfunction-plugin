@@ -395,8 +395,11 @@ public class TestWfSearchRewrite {
 
     @Test
     public void noSmartSetWhenBodyOmitsSnippet() {
-        // No wf:snippet in the body → don't emit a highlight opt; the
-        // guest picks its own default.
+        // No wf:snippet in the body → substrate emits the WIT-required
+        // `highlight:false` default. The pre-v1.3 behavior was to omit
+        // the key entirely and let the guest pick a default; the WIT
+        // now declares `highlight: bool` as non-option, so the
+        // substrate must always emit it.
         final DocumentRegistry reg = manualsRegistry();
         final InvokeRegistry inv = new InvokeRegistry();
         final Op input = parseAlgebra(""
@@ -411,8 +414,38 @@ public class TestWfSearchRewrite {
 
         final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
         assertThat(optsJsonArg(spec))
-                .as("no wf:snippet must leave highlight unset")
-                .doesNotContain("\"highlight\"");
+                .as("no wf:snippet must emit WIT-required highlight=false default")
+                .contains("\"highlight\":false")
+                .doesNotContain("\"highlight\":true");
+    }
+
+    @Test
+    public void optsJsonIncludesRequiredWitFields() {
+        // The wf_document WIT `search-opts` record declares `fields:
+        // list<string>` and `highlight: bool` as non-optional (memo §04,
+        // `wf-document.wit` v1.3). The substrate coercer errors out on
+        // a missing required field before the dispatch reaches the
+        // guest ("arg 4 of `search`: record missing required field
+        // `fields`"), so every wf_document opts_json emission must
+        // include both. Parallel guard to the wf_fulltext test of the
+        // same name.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc WHERE {\n"
+                + "  SERVICE <wf-search:manuals> {\n"
+                + "    ?_ wf:query \"waterproof\" ; wf:doc ?doc .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(optsJsonArg(spec))
+                .as("opts_json must include the WIT-required `fields` and `highlight` defaults")
+                .contains("\"fields\":[]")
+                .contains("\"highlight\":false");
     }
 
     @Test

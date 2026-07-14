@@ -754,12 +754,19 @@ public final class WfSearchRewrite {
         final StringBuilder sb = new StringBuilder();
         sb.append('{');
         sb.append("\"limit\":").append(limit);
+        // WIT-required default on the wf_document `search-opts` record
+        // (`wf-document.wit` v1.3): `fields: list<string>` is non-option,
+        // so the substrate must emit it or the guest's typed-record
+        // decoder fails with "record missing required field `fields`".
+        // Mirrors the identical fix already applied to the wf_fulltext
+        // `query-opts` record in `buildFulltextOptsJson` below.
+        sb.append(",\"fields\":[]");
         appendIntIfPresent(sb, parsed.opts.get("offset"), "offset");
         // Memo §10 smart-set: SERVICE body projecting `wf:snippet`
         // defaults `highlight` to true unless the URL opt already
-        // says otherwise. `appendBoolIfPresent` short-circuits on a
-        // null URL value, so the smart-set only fires when the URL
-        // opt is absent.
+        // says otherwise. `appendBoolWithDefault` always emits the
+        // key (WIT declares it non-option) using the smart-set flag
+        // as the fallback when the URL opt is absent.
         appendBoolWithDefault(sb, parsed.opts.get("highlight"), "highlight", projectsSnippet);
         appendStrIfPresent(sb, parsed.opts.get("lang"), "lang");
         appendStrIfPresent(sb, parsed.opts.get("filter"), "filter");
@@ -778,21 +785,24 @@ public final class WfSearchRewrite {
 
     /**
      * Emit a boolean opt with fallback semantics: the URL opt wins when
-     * present; otherwise the smart-set default is emitted only when
-     * true (memo §10 doesn't want to emit a spurious `highlight:false`
-     * on the document path when neither the URL nor the body says
-     * anything).
+     * present; otherwise the smart-set default is emitted. The WIT
+     * record in {@code wf-document.wit} v1.3 declares
+     * {@code highlight: bool} as non-option, so the substrate must
+     * always emit it — the guest's typed-record decoder errors out with
+     * "record missing required field" otherwise. Memo §10's smart-set
+     * still governs the {@code true} case; the {@code false} case
+     * satisfies the required-field constraint without changing
+     * caller-visible behavior.
      */
     private static void appendBoolWithDefault(final StringBuilder sb, final String v,
                                               final String key, final boolean smartSet) {
+        final boolean b;
         if (v != null && !v.isEmpty()) {
-            final boolean b = "true".equalsIgnoreCase(v) || "1".equals(v);
-            sb.append(",\"").append(key).append("\":").append(b);
-            return;
+            b = "true".equalsIgnoreCase(v) || "1".equals(v);
+        } else {
+            b = smartSet;
         }
-        if (smartSet) {
-            sb.append(",\"").append(key).append("\":true");
-        }
+        sb.append(",\"").append(key).append("\":").append(b);
     }
 
     private static void appendIntIfPresent(final StringBuilder sb, final String v, final String key) {
