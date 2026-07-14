@@ -435,6 +435,37 @@ public class TestFulltextRewrite {
     }
 
     @Test
+    public void optsJsonIncludesRequiredWitFields() {
+        // The wf_fulltext WIT `query-opts` record declares
+        // `fields: list<string>` and `highlight: bool` as non-optional.
+        // The substrate coercer errors out on a missing required field
+        // before the dispatch reaches the guest, so every code path
+        // that emits opts JSON must include both — even when the
+        // rewrite has no domain-level opinion about them.
+        final FulltextRegistry reg = productsRegistryWord();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX ex: <http://ex/>\n"
+                + "SELECT ?p ?label WHERE {\n"
+                + "  ?p ex:label ?label .\n"
+                + "  FILTER(CONTAINS(?label, \"widget\"))\n"
+                + "}");
+        final FulltextRewrite rw = new FulltextRewrite(reg, inv);
+        final Op out = rw.rewrite(input);
+        assertThat(rw.foldCount()).isEqualTo(1);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        final String opts = optsArg(spec);
+        assertThat(opts)
+                .as("opts_json must include the required `fields: []` default, got %s", opts)
+                .contains("\"fields\":[]");
+        assertThat(opts)
+                .as("opts_json must include the required `highlight: false` default, got %s", opts)
+                .contains("\"highlight\":false");
+    }
+
+    @Test
     public void emptyRegistryNoop() {
         final FulltextRegistry reg = FulltextRegistry.empty();
         final InvokeRegistry inv = new InvokeRegistry();

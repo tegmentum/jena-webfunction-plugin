@@ -503,13 +503,33 @@ public final class FulltextRewrite {
      * Query-time opts JSON. Minimal on purpose: propagates the language
      * tag when present, {@code case_insensitive} when the wrapper implied
      * it, plus a generous limit and highlight=false.
+     *
+     * <h4>Required WIT fields</h4>
+     *
+     * The {@code wf:fulltext} {@code query-opts} record declares two
+     * NON-OPTIONAL fields — {@code fields: list<string>} and
+     * {@code highlight: bool} (design memo &sect;04). The substrate's
+     * typed-args coercer parses this JSON back into the record shape; a
+     * missing required field yields "record missing required field
+     * `fields`" (or `highlight`) and the dispatch fails before it reaches
+     * the guest. Emit safe defaults for both:
+     * <ul>
+     *   <li>{@code fields: []} — "use the analyzer's default field set" per &sect;04.</li>
+     *   <li>{@code highlight: false} — skip snippet extraction on the
+     *       fold path; the filter-fold's job is a candidate set for the
+     *       outer FILTER to re-check, not surface highlighting.</li>
+     * </ul>
+     * Mirrors {@code oxigraph-wf/src/fulltext_rewrite.rs} 92083ba
+     * byte-for-byte on the wire.
      */
     private static String buildQueryOptsJson(final String lang, final CaseHint caseHint) {
         // Hand-built to match the Rust output's key ordering:
-        //   {"limit":10000,"highlight":false[,"lang":"..."][,"case_insensitive":true]}
+        //   {"limit":10000,"fields":[],"highlight":false[,"lang":"..."][,"case_insensitive":true]}
         final StringBuilder sb = new StringBuilder();
         sb.append('{');
         sb.append("\"limit\":10000");
+        // Required by the wf_fulltext WIT record — see doc-comment above.
+        sb.append(",\"fields\":[]");
         sb.append(",\"highlight\":false");
         if (lang != null) {
             sb.append(",\"lang\":\"").append(jsonEscape(lang)).append('"');
