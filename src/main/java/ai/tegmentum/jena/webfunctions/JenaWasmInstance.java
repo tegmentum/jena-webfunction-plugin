@@ -492,11 +492,16 @@ public final class JenaWasmInstance implements Closeable {
             case OPTION: {
                 final ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor inner =
                         target.getOptionType();
+                // WitOption.some/none demand the OPTION-wrapped WitType, not the
+                // inner type — passing the inner triggers extractInnerType's
+                // "Type must be an option type" guard. `witTypeOf(target)` wraps
+                // `option<inner>` correctly (see the OPTION case below).
+                final ai.tegmentum.wasmtime4j.wit.WitType optionTy = witTypeOf(target);
                 if (json.isNull()) {
-                    return ai.tegmentum.wasmtime4j.wit.WitOption.none(witTypeOf(inner));
+                    return ai.tegmentum.wasmtime4j.wit.WitOption.none(optionTy);
                 }
                 return ai.tegmentum.wasmtime4j.wit.WitOption.some(
-                        witTypeOf(inner),
+                        optionTy,
                         jsonToWit(json, inner));
             }
             case LIST: {
@@ -554,8 +559,10 @@ public final class JenaWasmInstance implements Closeable {
                     final org.apache.jena.atlas.json.JsonValue fieldJson = obj.get(name);
                     if ((fieldJson == null || fieldJson.isNull())
                             && fieldTy.getType() == ai.tegmentum.wasmtime4j.component.ComponentType.OPTION) {
+                        // Pass the OPTION-wrapped type, not the inner type — same
+                        // reason as the OPTION branch above.
                         b.field(name, ai.tegmentum.wasmtime4j.wit.WitOption.none(
-                                witTypeOf(fieldTy.getOptionType())));
+                                witTypeOf(fieldTy)));
                     } else if (fieldJson == null && synthMissing) {
                         b.field(name, defaultValFor(fieldTy));
                     } else if (fieldJson == null) {
@@ -645,7 +652,9 @@ public final class JenaWasmInstance implements Closeable {
             case LIST:
                 return ai.tegmentum.wasmtime4j.wit.WitList.empty(witTypeOf(ty.getElementType()));
             case OPTION:
-                return ai.tegmentum.wasmtime4j.wit.WitOption.none(witTypeOf(ty.getOptionType()));
+                // Pass the OPTION-wrapped type, not the inner type — see
+                // jsonToWit's OPTION branch for the same reasoning.
+                return ai.tegmentum.wasmtime4j.wit.WitOption.none(witTypeOf(ty));
             default:
                 throw new IllegalArgumentException(
                         "no default-synth value for target kind " + kind
