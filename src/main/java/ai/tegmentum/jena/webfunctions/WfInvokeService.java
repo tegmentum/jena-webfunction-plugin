@@ -94,11 +94,26 @@ public final class WfInvokeService implements ChainingServiceExecutor {
         // per-binding evaluation needed here.
         final Node[] args = spec.args.toArray(new Node[0]);
 
-        // Discover output-column bindings in the SERVICE body (the same
-        // `_:o wf:<column> ?var` shape as WfCallServiceExecutor). If the
-        // body has none, fall back to projecting on the guest's own
-        // variable names so callers get a useful default.
-        final Map<String, Var> outputVars = collectOutputBindings(opService.getSubOp());
+        // Discover output-column bindings. Prefer the rewrite-time map
+        // stashed on {@link InvokeRegistry.InvokeSpec#projection} when
+        // present — that map was captured BEFORE Jena's per-outer-
+        // binding substitution rewrote `wf:doc ?m` into
+        // `wf:doc <manual_widget>` here. Falling back to walking the
+        // (substituted) SERVICE body silently loses those triples,
+        // which collapses the outer join to a Cartesian product on any
+        // shared variable (federation_wf_search regression). The
+        // fallback still fires for un-projected callers (e.g. legacy
+        // wf:partial folds that never populate the map).
+        final Map<String, Var> outputVars;
+        if (spec.projection != null && !spec.projection.isEmpty()) {
+            final Map<String, Var> tmp = new LinkedHashMap<>();
+            for (Map.Entry<String, String> e : spec.projection.entrySet()) {
+                tmp.put(e.getKey(), Var.alloc(e.getValue()));
+            }
+            outputVars = tmp;
+        } else {
+            outputVars = collectOutputBindings(opService.getSubOp());
+        }
 
         final CallbackContext cbCtx = CallbackContext.bind(ctx);
         final List<WitValueMarshaller.Row> rows;
@@ -115,6 +130,7 @@ public final class WfInvokeService implements ChainingServiceExecutor {
         }
 
         final List<Binding> out = new ArrayList<>(rows.size());
+        outer:
         for (WitValueMarshaller.Row row : rows) {
             final BindingBuilder bb = BindingBuilder.create(binding);
             if (outputVars.isEmpty()) {
@@ -123,7 +139,19 @@ public final class WfInvokeService implements ChainingServiceExecutor {
                 for (int i = 0; i < row.vars.size(); i++) {
                     final Node v = row.values.get(i);
                     if (v == null) continue;
-                    bb.add(Var.alloc(row.vars.get(i)), v);
+                    final Var vv = Var.alloc(row.vars.get(i));
+                    final Node existing = binding.get(vv);
+                    if (existing != null) {
+                        // Outer already bound the variable — SPARQL join
+                        // semantics: drop rows whose guest column
+                        // disagrees. This is the compat-merge the
+                        // per-outer-binding stage would apply if the
+                        // wasm-emitted `list<hit>` came back through the
+                        // normal solution-mapping join path.
+                        if (!existing.equals(v)) continue outer;
+                    } else {
+                        bb.add(vv, v);
+                    }
                 }
             } else {
                 for (Map.Entry<String, Var> e : outputVars.entrySet()) {
@@ -131,7 +159,19 @@ public final class WfInvokeService implements ChainingServiceExecutor {
                     if (idx < 0) continue;
                     final Node v = row.values.get(idx);
                     if (v == null) continue;
-                    bb.add(e.getValue(), v);
+                    final Node existing = binding.get(e.getValue());
+                    if (existing != null) {
+                        // See note above — enforce the shared-variable
+                        // compat merge that Jena's substitution-based
+                        // dispatch normally handles. The wasm side never
+                        // saw the outer binding (we resolve column
+                        // renames from the pre-substitution InvokeSpec
+                        // projection, not from the substituted SERVICE
+                        // body), so we finish the join here.
+                        if (!existing.equals(v)) continue outer;
+                    } else {
+                        bb.add(e.getValue(), v);
+                    }
                 }
             }
             out.add(bb.build());

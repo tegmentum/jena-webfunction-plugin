@@ -38,15 +38,51 @@ public final class InvokeRegistry {
          * {@link ai.tegmentum.jena.webfunctions.JenaWasmInstance#resolveEntryPoint(String)}.
          */
         public final String entryPoint;
+        /**
+         * Rewrite-time projection map from guest-emitted column name
+         * ({@code doc}, {@code snippet}, ...) to outer-query variable name.
+         * Populated by rewrite passes that inspect the SERVICE body's
+         * {@code ?_ wf:<col> ?var} triples BEFORE Jena's per-binding
+         * substitution rewrites them away.
+         *
+         * <p>{@link ai.tegmentum.jena.webfunctions.WfInvokeService} prefers
+         * this map when non-empty; when empty (or on the pre-projection
+         * path), the executor falls back to walking the SERVICE body it
+         * receives at dispatch time. The fallback is broken for any
+         * {@code wf:<col> ?var} whose {@code ?var} is bound by the outer
+         * scope — Jena substitutes the outer value into the SERVICE body
+         * before {@code createExecution} sees it, so the executor scan
+         * only finds the still-free {@code wf:<col> ?var} triples and
+         * silently drops the substituted ones. That gap collapses the
+         * outer join to a Cartesian product (federation_wf_search
+         * regression).
+         *
+         * <p>Mirrors the Rust QLever fix
+         * ({@code qlever-wf-runtime::wf_search_rewrite} commit
+         * {@code 04fdb03}), which threads the same map through
+         * {@code InvokeSpec.projection}.
+         *
+         * <p>Insertion-ordered so declaration order is preserved for
+         * reproducible debug output.
+         */
+        public final Map<String, String> projection;
 
         public InvokeSpec(final String wasmUrl, final List<Node> args) {
-            this(wasmUrl, args, null);
+            this(wasmUrl, args, null, Map.of());
         }
 
         public InvokeSpec(final String wasmUrl, final List<Node> args, final String entryPoint) {
+            this(wasmUrl, args, entryPoint, Map.of());
+        }
+
+        public InvokeSpec(final String wasmUrl, final List<Node> args, final String entryPoint,
+                          final Map<String, String> projection) {
             this.wasmUrl = wasmUrl;
             this.args = Collections.unmodifiableList(args);
             this.entryPoint = entryPoint;
+            this.projection = projection == null
+                    ? Map.of()
+                    : Collections.unmodifiableMap(new java.util.LinkedHashMap<>(projection));
         }
     }
 

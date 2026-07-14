@@ -158,11 +158,23 @@ public final class WfSearchRewrite {
                 return super.transform(opService, subOp);
             }
 
+            // Walk the SERVICE body ONCE at rewrite time to derive the
+            // (guest_col -> outer_var) projection map from every
+            // `?_ wf:<col> ?var` triple. This map has to be captured
+            // BEFORE Jena's per-outer-binding substitution rewrites
+            // `wf:doc ?m` into `wf:doc <manual_widget>` at execution
+            // time — the WfInvokeService fallback that walks the
+            // (substituted) sub-op silently misses those, which is what
+            // collapses the outer join to a Cartesian product in the
+            // federation_wf_search regression. Mirrors the QLever fix
+            // (`qlever-wf-runtime::wf_search_rewrite` commit `04fdb03`).
+            final Map<String, String> projection = collectOutputProjection(subOp);
+
             // Primary path: DocumentRegistry (wf_document guest ABI).
             final DocumentRegistry.DocumentIndex docEntry =
                     registry == null ? null : registry.byName(parsed.name);
             if (docEntry != null) {
-                final String iri = allocateDocumentInvoke(docEntry, parsed, query);
+                final String iri = allocateDocumentInvoke(docEntry, parsed, query, projection);
                 final Node newSvc = NodeFactory.createURI(iri);
                 return new OpService(newSvc, subOp, opService.getSilent());
             }
@@ -173,7 +185,7 @@ public final class WfSearchRewrite {
             final FulltextRegistry.FulltextIndex ftEntry =
                     fulltextRegistry == null ? null : fulltextRegistry.byName(parsed.name);
             if (ftEntry != null) {
-                final String iri = allocateFulltextInvoke(ftEntry, parsed, query);
+                final String iri = allocateFulltextInvoke(ftEntry, parsed, query, projection);
                 final Node newSvc = NodeFactory.createURI(iri);
                 return new OpService(newSvc, subOp, opService.getSilent());
             }
@@ -317,6 +329,61 @@ public final class WfSearchRewrite {
     // ---------------------------------------------------------------------
 
     /**
+     * Walk the SERVICE body and collect every {@code ?_ wf:<col> ?var}
+     * triple as a (guest_col -> outer_var) rename entry. Java analogue
+     * of {@code qlever-wf-runtime::partial_rewrite::collect_output_projection}
+     * (commit `04fdb03`).
+     *
+     * <p>Called at rewrite time so the map is captured BEFORE Jena's
+     * per-outer-binding substitution rewrites the still-free {@code ?var}
+     * into a bound literal at execution time. The wf-invoke SERVICE
+     * dispatcher ({@link ai.tegmentum.jena.webfunctions.WfInvokeService})
+     * consumes the map from {@link InvokeRegistry.InvokeSpec#projection}
+     * to rename guest-emitted columns onto the outer-query variables the
+     * caller declared.
+     *
+     * <p>Predicates that describe the invocation itself
+     * ({@code wf:wasm}, {@code wf:arg}, {@code wf:call}, {@code wf:query})
+     * are skipped — they aren't output-column renames. Literal-valued
+     * triples are skipped too, for the same reason.
+     */
+    private static Map<String, String> collectOutputProjection(final Op body) {
+        final Map<String, String> out = new LinkedHashMap<>();
+        if (body == null) return out;
+        OpWalker.walk(body, new OpVisitorBase() {
+            void consider(final Triple t) {
+                final Node p = t.getPredicate();
+                if (p == null || !p.isURI()) return;
+                final String pUri = p.getURI();
+                if (!pUri.startsWith(WF_NS)) return;
+                final String col = pUri.substring(WF_NS.length());
+                // Skip config-side predicates the wf:call envelope uses
+                // (wasm URL / args / self-call marker) and the
+                // wf-search sugar's own query-literal carrier. None of
+                // these carry an output-column rename.
+                if ("wasm".equals(col) || "arg".equals(col)
+                        || "call".equals(col) || "query".equals(col)) {
+                    return;
+                }
+                final Node obj = t.getObject();
+                if (obj == null || !obj.isVariable()) return;
+                out.put(col, obj.getName());
+            }
+
+            @Override
+            public void visit(final OpBGP opBGP) {
+                for (Triple t : opBGP.getPattern()) consider(t);
+            }
+
+            @Override
+            public void visit(final OpTriple opTriple) {
+                consider(opTriple.getTriple());
+            }
+        });
+        return out;
+    }
+
+    /**
      * Walk the SERVICE body looking for a triple whose predicate is
      * {@link #WF_QUERY} and whose object is a literal. Return the
      * lexical form of that literal, or null when no such triple exists.
@@ -353,7 +420,8 @@ public final class WfSearchRewrite {
 
     private String allocateDocumentInvoke(final DocumentRegistry.DocumentIndex entry,
                                           final ParsedUrl parsed,
-                                          final String query) {
+                                          final String query,
+                                          final Map<String, String> projection) {
         final int limit = resolveLimit(parsed);
         final String optsJson = buildOptsJson(parsed, limit);
 
@@ -366,7 +434,7 @@ public final class WfSearchRewrite {
         args.add(NodeFactory.createLiteralString(optsJson));
 
         final long id = invokes.insert(
-                new InvokeRegistry.InvokeSpec(entry.guestUrl(), args, "search"));
+                new InvokeRegistry.InvokeSpec(entry.guestUrl(), args, "search", projection));
         return InvokeRegistry.iriFor(id);
     }
 
@@ -386,7 +454,8 @@ public final class WfSearchRewrite {
      */
     private String allocateFulltextInvoke(final FulltextRegistry.FulltextIndex entry,
                                           final ParsedUrl parsed,
-                                          final String query) {
+                                          final String query,
+                                          final Map<String, String> projection) {
         // wf_fulltext guest's WIT `query-opts` record has two REQUIRED
         // fields: `fields: list<string>` and `highlight: bool`. Emit
         // both as defaults; without them the substrate's typed-arg
@@ -404,7 +473,7 @@ public final class WfSearchRewrite {
         args.add(NodeFactory.createLiteralString(optsJson));
 
         final long id = invokes.insert(
-                new InvokeRegistry.InvokeSpec(entry.backendUrl(), args, "search"));
+                new InvokeRegistry.InvokeSpec(entry.backendUrl(), args, "search", projection));
         return InvokeRegistry.iriFor(id);
     }
 
