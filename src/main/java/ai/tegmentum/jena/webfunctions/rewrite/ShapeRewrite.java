@@ -7,10 +7,12 @@ import org.apache.jena.sparql.algebra.Op;
 import org.apache.jena.sparql.algebra.TransformCopy;
 import org.apache.jena.sparql.algebra.Transformer;
 import org.apache.jena.sparql.algebra.op.OpBGP;
+import org.apache.jena.sparql.algebra.op.OpExtend;
 import org.apache.jena.sparql.algebra.op.OpGraph;
 import org.apache.jena.sparql.algebra.op.OpService;
 import org.apache.jena.sparql.core.BasicPattern;
 import org.apache.jena.sparql.core.Var;
+import org.apache.jena.sparql.expr.NodeValue;
 
 import java.util.AbstractMap;
 import java.util.ArrayList;
@@ -37,6 +39,31 @@ import java.util.Map;
  * </ul>
  * BGPs that don't meet the bar pass through unchanged — v1 never
  * splits BGPs into shape-covered and store-covered halves.
+ *
+ * <h2>Virtual per-shape graph</h2>
+ *
+ * A shape logically owns a virtual named graph whose IRI is
+ * {@code urn:wf:shape:<shape-name>}. When the qualifying BGP is
+ * wrapped in {@code GRAPH ?g { ... }} the rewrite folds the graph
+ * binding into the emitted algebra:
+ *
+ * <ul>
+ *   <li>{@code GRAPH ?g { shape-BGP }} — the whole {@code OpGraph}
+ *       becomes {@code OpExtend(?g = <urn:wf:shape:X>, OpService)}.</li>
+ *   <li>{@code GRAPH <urn:wf:shape:X> { shape-BGP }} where the IRI
+ *       matches — the {@code OpGraph} wrapper drops; the
+ *       {@code OpService} runs against the sink directly.</li>
+ *   <li>{@code GRAPH <other-iri> { shape-BGP }} — leave unchanged; the
+ *       store's own named-graph iteration handles it (typically 0 rows
+ *       since sink triples don't live in any real named graph).</li>
+ *   <li>Default-graph shape-BGP — historic path; rewrite to
+ *       {@code OpService} with no {@code ?g} binding.</li>
+ * </ul>
+ *
+ * <p>{@code GRAPH} bodies that aren't a bare {@code OpBGP} (nested
+ * joins, filters, subqueries) fall through to the default
+ * {@code TransformCopy} behaviour so the shape pass never fires in
+ * scopes it can't reason about.
  */
 public final class ShapeRewrite {
 
@@ -50,8 +77,14 @@ public final class ShapeRewrite {
     static final String WF_WASM_IRI = WF_NS + "wasm";
     static final String WF_ARG_IRI = WF_NS + "arg";
     static final String RDF_TYPE = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    static final String SHAPE_GRAPH_PREFIX = "urn:wf:shape:";
 
     private ShapeRewrite() {}
+
+    /** Virtual named-graph IRI for a shape. */
+    public static String shapeVirtualGraphIri(final String shapeName) {
+        return SHAPE_GRAPH_PREFIX + shapeName;
+    }
 
     /**
      * @return rewritten Op — a copy with qualifying BGPs replaced by
@@ -78,31 +111,60 @@ public final class ShapeRewrite {
 
         @Override
         public Op transform(final OpBGP opBGP) {
-            final Op rewritten = tryRewriteBgp(opBGP.getPattern());
-            return rewritten == null ? super.transform(opBGP) : rewritten;
+            final RewriteResult rewritten = tryRewriteBgp(opBGP.getPattern());
+            return rewritten == null ? super.transform(opBGP) : rewritten.op;
         }
 
         /**
-         * Do NOT descend into `GRAPH ?g { ... }` clauses. Rewriting the
-         * inner BGP would replace it with {@code SERVICE <wf:call>},
-         * whose result rows carry no named-graph provenance — the sink
-         * is a SQLite side-channel, not a named graph. SPARQL 1.1
-         * evaluation of {@code Graph} iterates over the dataset's
-         * named graphs and binds {@code ?g} from that iteration; the
-         * SERVICE has nothing to contribute. Leave shape-covered BGPs
-         * inside GRAPH alone so store semantics apply (see
-         * wf-conformance graph_shape_interaction.toml).
+         * Fold shape-BGP rewrites through {@code GRAPH} clauses. See
+         * the class docstring for the semantics table.
          *
-         * <p>Returning the OpGraph as-is (instead of calling
-         * {@code super.transform}, which would recurse into the
-         * subOp) stops the shape pass from firing under GRAPH.
+         * <p>Jena's {@link Transformer} runs bottom-up, so by the time
+         * this method fires the inner BGP has already been processed
+         * by {@link #transform(OpBGP)} and replaced with an
+         * {@link OpService}. Work from {@code opGraph.getSubOp()} (the
+         * pristine original) rather than the transformed {@code subOp}
+         * so we can decide, from a clean slate, whether the outer
+         * GRAPH scope wants a rewritten SERVICE, an unwrapped SERVICE,
+         * or the untouched original BGP. Whichever we pick, the
+         * already-transformed {@code subOp} is discarded.
+         *
+         * <p>Only bare-BGP bodies are handled here. Non-BGP bodies —
+         * or bodies where the shape rewrite refuses — return the
+         * original OpGraph unchanged so the pre-virtual-graph safety
+         * net (store semantics under GRAPH) still holds.
          */
         @Override
         public Op transform(final OpGraph opGraph, final Op subOp) {
+            final Op original = opGraph.getSubOp();
+            if (!(original instanceof OpBGP bgp)) {
+                return opGraph;
+            }
+            final RewriteResult rewritten = tryRewriteBgp(bgp.getPattern());
+            if (rewritten == null) {
+                return opGraph;
+            }
+            final Node name = opGraph.getNode();
+            final String virt = shapeVirtualGraphIri(rewritten.shapeName);
+            if (name.isVariable()) {
+                final Var graphVar = Var.alloc(name.getName());
+                return OpExtend.create(rewritten.op, graphVar,
+                        NodeValue.makeNode(NodeFactory.createURI(virt)));
+            }
+            if (name.isURI()) {
+                if (virt.equals(name.getURI())) {
+                    return rewritten.op;
+                }
+                // Named IRI that isn't the shape's virtual — leave
+                // GRAPH alone. The store's own scan produces zero rows
+                // against a non-existent named graph, matching SPARQL
+                // 1.1 semantics.
+                return opGraph;
+            }
             return opGraph;
         }
 
-        private Op tryRewriteBgp(final BasicPattern pattern) {
+        private RewriteResult tryRewriteBgp(final BasicPattern pattern) {
             if (pattern.isEmpty()) {
                 return null;
             }
@@ -136,12 +198,21 @@ public final class ShapeRewrite {
                 columns.add(new AbstractMap.SimpleImmutableEntry<>(
                         predIri, Var.alloc(obj.getName())));
             }
-            if (columns.isEmpty()) {
-                return null;
-            }
 
-            return resolveShape(columns, classIri)
-                    .map(pair -> buildService(subjectVar, pair.getKey(), pair.getValue()))
+            final String finalClassIri = classIri;
+            return resolveShape(columns, finalClassIri)
+                    .map(pair -> {
+                        // Bare `?s a :Widget` case: no column triples,
+                        // but the anchor-class match alone is enough
+                        // to dispatch (see graph_shape_virtual.toml).
+                        if (pair.getValue().isEmpty()
+                                && pair.getKey().anchorClass == null) {
+                            return null;
+                        }
+                        final Op service = buildService(
+                                subjectVar, pair.getKey(), pair.getValue());
+                        return new RewriteResult(service, pair.getKey().name);
+                    })
                     .orElse(null);
         }
 
@@ -182,6 +253,12 @@ public final class ShapeRewrite {
                 } else if (shape != maybe.get()) {
                     return java.util.Optional.empty();
                 }
+            }
+            // Anchor-only fallback: bare `?s a :Widget` pattern picks
+            // the shape whose anchor_class matches, even without any
+            // column predicates.
+            if (shape == null && classIri != null) {
+                shape = registry.findByClass(classIri).orElse(null);
             }
             if (shape == null) {
                 return java.util.Optional.empty();
@@ -242,4 +319,8 @@ public final class ShapeRewrite {
                     new OpBGP(bp), false);
         }
     }
+
+    /** Rewrite output pair: the SERVICE op and the shape's name for
+     *  virtual-graph IRI construction. */
+    private record RewriteResult(Op op, String shapeName) {}
 }
