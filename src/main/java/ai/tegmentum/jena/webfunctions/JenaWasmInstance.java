@@ -231,6 +231,16 @@ public final class JenaWasmInstance implements Closeable {
         linker.addWitHostFunction(
             "wf:fulltext/host@0.1.0#http-post-json",
             HostCallbacks.httpPostJson());
+        // wf:document/host@1.3.0 — same shape (`http-post-json(url, body)
+        // -> result<string, string>`) as wf:fulltext's, but under a
+        // separately-versioned interface for the wf_document guest. The
+        // guest uses it both for Manticore search calls and for Sirix
+        // storage-backend fetches, so a document-mode SERVICE dispatch
+        // needs this linker binding to instantiate at all. Additive —
+        // guests that never import wf:document see no change in behaviour.
+        linker.addWitHostFunction(
+            "wf:document/host@1.3.0#http-post-json",
+            HostCallbacks.httpPostJson());
         this.instance = component.instantiate(linker.build());
     }
 
