@@ -175,11 +175,19 @@ public final class ConformanceMain {
         // matches the fulltext / document registries; wired into the
         // rewrite pipeline below so a `--federation-config` invocation
         // actually rewrites BGPs into SERVICE calls.
+        //
+        // v0.2 probe-mode wiring: every loaded registry is chained
+        // through `withProbeFn(defaultAskProbeFn())` so registries whose
+        // JSON sets `probe_mode: true` actually issue ASK queries at
+        // plan time. Empty registries pay nothing (the probe path never
+        // fires when `probe_mode = false`), so we install the fn
+        // unconditionally to keep the boot path simple.
         final FederationRegistry federationRegistry;
         try {
             federationRegistry = federationCfg == null
                     ? FederationRegistry.empty()
-                    : FederationRegistry.loadFromJson(federationCfg);
+                    : FederationRegistry.loadFromJson(federationCfg)
+                            .withProbeFn(defaultAskProbeFn());
         } catch (Exception e) {
             err.println("federation config error: " + e.getMessage());
             return 2;
@@ -415,6 +423,58 @@ public final class ConformanceMain {
         final JsonObject obj = JSON.parse(Files.readString(p));
         if (!obj.hasKey("wf_fetch_url")) return null;
         return obj.get("wf_fetch_url").getAsString().value();
+    }
+
+    /**
+     * Default v0.2 ASK-probe function &mdash; issues
+     * {@code ASK { ?s <predicate> ?o }} against {@code source.endpoint()}
+     * over HTTP using the JDK's built-in {@link java.net.http.HttpClient}
+     * (same class {@code HostCallbacks.httpPostJsonImpl} uses, so
+     * substrate-wide error/timeout behaviour stays consistent).
+     * Only meaningful for {@code SPARQL} / {@code HTTP_SPARQL} sources
+     * &mdash; other source types (wf-search / wf-fetch / etc.) don't
+     * speak SPARQL so the probe returns {@code false} for them (the
+     * static predicate list stays the source of truth for wf-* sources).
+     *
+     * <p>Kept in {@code ConformanceMain} rather than in
+     * {@link FederationRegistry} to respect the v0.2 landing's DNT
+     * fence on the registry module. Mirrors
+     * {@code oxigraph-wf::federation_registry::default_ask_probe_fn}
+     * so all four engines exhibit identical probe semantics under an
+     * identical registry JSON.
+     */
+    private static FederationRegistry.ProbeFn defaultAskProbeFn() {
+        return (src, predicateIri) -> {
+            final FederationRegistry.SourceType t = src.sourceType();
+            if (t != FederationRegistry.SourceType.SPARQL
+                    && t != FederationRegistry.SourceType.HTTP_SPARQL) {
+                return false;
+            }
+            final String query = "ASK { ?s <" + predicateIri + "> ?o }";
+            final java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                    .connectTimeout(java.time.Duration.ofSeconds(30))
+                    .build();
+            final java.net.http.HttpRequest request = java.net.http.HttpRequest
+                    .newBuilder(java.net.URI.create(src.endpoint()))
+                    .timeout(java.time.Duration.ofSeconds(30))
+                    .header("Content-Type", "application/sparql-query")
+                    .header("Accept", "application/sparql-results+json")
+                    .POST(java.net.http.HttpRequest.BodyPublishers.ofString(
+                            query, java.nio.charset.StandardCharsets.UTF_8))
+                    .build();
+            final java.net.http.HttpResponse<String> response = client.send(
+                    request, java.net.http.HttpResponse.BodyHandlers.ofString(
+                            java.nio.charset.StandardCharsets.UTF_8));
+            final int status = response.statusCode();
+            if (status < 200 || status >= 300) {
+                throw new java.io.IOException(
+                        "probe HTTP " + status + ": " + response.body());
+            }
+            // Minimal SPARQL Results JSON parse — {"head":{}, "boolean": true|false}.
+            final JsonObject obj = JSON.parse(response.body());
+            if (!obj.hasKey("boolean")) return false;
+            return obj.get("boolean").getAsBoolean().value();
+        };
     }
 
     // ---------------------------------------------------------------
