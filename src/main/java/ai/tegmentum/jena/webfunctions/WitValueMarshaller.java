@@ -13,6 +13,7 @@ import ai.tegmentum.wasmtime4j.wit.WitTuple;
 import ai.tegmentum.wasmtime4j.wit.WitType;
 import ai.tegmentum.wasmtime4j.wit.WitU32;
 import ai.tegmentum.wasmtime4j.wit.WitU64;
+import ai.tegmentum.wasmtime4j.wit.WitU8;
 import ai.tegmentum.wasmtime4j.wit.WitValue;
 import ai.tegmentum.wasmtime4j.wit.WitVariant;
 
@@ -20,8 +21,13 @@ import org.apache.jena.datatypes.xsd.XSDDatatype;
 import org.apache.jena.graph.Node;
 import org.apache.jena.graph.NodeFactory;
 
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -282,9 +288,9 @@ public final class WitValueMarshaller {
                 if (e.getKey().equals("doc")
                         || e.getKey().equals("score")
                         || e.getKey().equals("fields")) continue;
-                final String s = flattenOptionalString(e.getValue());
-                if (s == null) continue;
-                row.put(e.getKey(), scalarToNode(s));
+                final TypedScalar ts = flattenOptionalStringOrBytes(e.getValue());
+                if (ts == null) continue;
+                row.put(e.getKey(), typedScalarToNode(ts));
                 varSet.add(e.getKey());
             }
 
@@ -438,15 +444,134 @@ public final class WitValueMarshaller {
         return null;
     }
 
-    private static String flattenOptionalString(final WitValue v) {
-        if (v instanceof WitString) return ((WitString) v).getValue();
+    /**
+     * Result of {@link #flattenOptionalStringOrBytes(WitValue)} —
+     * either UTF-8 text (routed through {@link #scalarToNode(String)}
+     * so URI-shaped strings still lift to IRI nodes) or opaque bytes
+     * (rendered as an {@code xsd:base64Binary} literal).
+     *
+     * <p>Mirrors {@code oxigraph-wf::wf_call::TypedScalar} field-for-
+     * field so the four engines project identical bindings on the
+     * same guest output.
+     */
+    static final class TypedScalar {
+        static final int TEXT = 0;
+        static final int BYTES = 1;
+        final int kind;
+        final String text;
+        final byte[] bytes;
+
+        private TypedScalar(final int kind, final String text, final byte[] bytes) {
+            this.kind = kind;
+            this.text = text;
+            this.bytes = bytes;
+        }
+
+        static TypedScalar text(final String s) {
+            return new TypedScalar(TEXT, s, null);
+        }
+
+        static TypedScalar bytes(final byte[] b) {
+            return new TypedScalar(BYTES, null, b);
+        }
+    }
+
+    /**
+     * Flatten {@code option<string>} <b>or</b> {@code option<list<u8>>}
+     * — the two shapes hit records use for opaque top-level scalar
+     * fields.
+     *
+     * <p>Projection rules:
+     * <ul>
+     *   <li>{@link WitString} and {@code Option(Some(WitString))} → text.</li>
+     *   <li>{@link WitList} of {@link WitU8} and
+     *       {@code Option(Some(WitList<u8>))} → UTF-8 decode. If the
+     *       bytes are valid UTF-8 the result is text; otherwise raw
+     *       bytes for the caller to base64-encode.</li>
+     *   <li>Everything else — including {@code Option(None)} — returns
+     *       {@code null} so the caller drops the binding.</li>
+     * </ul>
+     *
+     * <p>The UTF-8-first policy trades one strict decode per hit for
+     * ergonomic SPARQL access to text bodies (the common case for
+     * wf_document corpora); binary bodies still round-trip correctly
+     * via base64. See
+     * {@code oxigraph-wf::wf_call::flatten_optional_string_or_bytes}
+     * for the shared policy rationale.
+     *
+     * <p>Non-list, non-string option payloads (e.g. {@code option<u32>})
+     * are ignored here — those need their own projector.
+     */
+    static TypedScalar flattenOptionalStringOrBytes(final WitValue v) {
+        if (v == null) return null;
+        if (v instanceof WitString) {
+            return TypedScalar.text(((WitString) v).getValue());
+        }
         if (v instanceof WitOption) {
             final Optional<WitValue> inner = ((WitOption) v).getValue();
-            if (inner.isPresent() && inner.get() instanceof WitString) {
-                return ((WitString) inner.get()).getValue();
-            }
-            return null;
+            if (inner.isEmpty()) return null;
+            return flattenOptionalStringOrBytes(inner.get());
+        }
+        if (v instanceof WitList) {
+            final byte[] bytes = collectBytes((WitList) v);
+            if (bytes == null) return null;
+            return classifyBytes(bytes);
         }
         return null;
+    }
+
+    /**
+     * UTF-8-first classification with strict decode reporting: valid
+     * UTF-8 wins so downstream SPARQL sees an {@code xsd:string};
+     * failure falls back to raw bytes for the base64 path.
+     *
+     * <p>Uses a {@link java.nio.charset.CharsetDecoder} in REPORT mode
+     * rather than {@code new String(bytes, UTF_8)} because the latter
+     * silently replaces malformed sequences with U+FFFD, which would
+     * lie to the caller about the datatype.
+     */
+    private static TypedScalar classifyBytes(final byte[] bytes) {
+        try {
+            final String decoded = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(bytes))
+                    .toString();
+            return TypedScalar.text(decoded);
+        } catch (CharacterCodingException e) {
+            return TypedScalar.bytes(bytes);
+        }
+    }
+
+    /**
+     * A WIT {@code list<u8>} arrives as a {@link WitList} whose every
+     * element is a {@link WitU8}. If any element isn't a byte we bail
+     * out ({@code null}) so the caller doesn't accidentally coerce an
+     * unrelated list shape into a bytes projection.
+     */
+    private static byte[] collectBytes(final WitList list) {
+        final List<WitValue> elems = list.getElements();
+        final byte[] out = new byte[elems.size()];
+        for (int i = 0; i < elems.size(); i++) {
+            final WitValue e = elems.get(i);
+            if (!(e instanceof WitU8)) return null;
+            out[i] = ((WitU8) e).getValue();
+        }
+        return out;
+    }
+
+    /**
+     * Render a {@link TypedScalar} as a Jena {@link Node}:
+     *   * text → {@link #scalarToNode(String)} (URI-shaped strings
+     *     become {@code NamedNode}, everything else {@code xsd:string});
+     *   * bytes → {@code xsd:base64Binary} literal.
+     */
+    private static Node typedScalarToNode(final TypedScalar ts) {
+        if (ts.kind == TypedScalar.TEXT) {
+            return scalarToNode(ts.text);
+        }
+        return NodeFactory.createLiteralDT(
+                Base64.getEncoder().encodeToString(ts.bytes),
+                XSDDatatype.XSDbase64Binary);
     }
 }
