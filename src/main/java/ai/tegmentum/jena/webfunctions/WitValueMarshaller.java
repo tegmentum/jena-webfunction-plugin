@@ -250,13 +250,25 @@ public final class WitValueMarshaller {
 
             final LinkedHashMap<String, Node> row = new LinkedHashMap<>();
 
+            // `hit.doc` shape: either a plain `string` (legacy
+            // wf_fulltext) or a `doc-ref { id: string,
+            // revision: option<u64> }` record (wf_document v1.0+).
+            // The record shape carries a bitemporal `revision` signal
+            // that we surface as `?revision` (xsd:integer) when Some.
+            // Legacy string shape stays wire-compatible. Mirrors
+            // `oxigraph-wf/src/wf_call.rs::flatten_hit_doc`.
             boolean docUsedSubject = false;
-            if (fields.get("doc") instanceof WitString) {
-                final String docStr = ((WitString) fields.get("doc")).getValue();
-                final String[] picked = pickDoc(docStr, innerFields);
+            final DocRefFlat flat = flattenHitDoc(fields.get("doc"));
+            if (flat != null) {
+                final String[] picked = pickDoc(flat.id, innerFields);
                 docUsedSubject = "1".equals(picked[1]);
                 row.put("doc", scalarToNode(picked[0]));
                 varSet.add("doc");
+                if (flat.revision != null) {
+                    row.put("revision", NodeFactory.createLiteralDT(
+                            flat.revision.toString(), XSDDatatype.XSDinteger));
+                    varSet.add("revision");
+                }
             }
 
             final Double score = numericField(fields.get("score"));
@@ -351,6 +363,78 @@ public final class WitValueMarshaller {
         if (v instanceof WitU64) return (double) ((WitU64) v).getValue();
         if (v instanceof WitS32) return (double) ((WitS32) v).getValue();
         if (v instanceof WitU32) return (double) ((WitU32) v).getValue();
+        return null;
+    }
+
+    /**
+     * Flattened view of {@code hit.doc}: the {@code id} string plus an
+     * optional {@code revision} (Long — WIT {@code option<u64>}).
+     * {@code revision} is {@code null} when the guest left it {@code None}.
+     */
+    static final class DocRefFlat {
+        final String id;
+        final Long revision;
+        DocRefFlat(final String id, final Long revision) {
+            this.id = id;
+            this.revision = revision;
+        }
+    }
+
+    /**
+     * Flatten {@code hit.doc} into an {@link DocRefFlat}.
+     *
+     * <p>Accepts two shapes:
+     * <ul>
+     *   <li>{@link WitString} — legacy wf_fulltext hit, doc is a plain
+     *       string. {@code revision} is {@code null}.</li>
+     *   <li>{@link WitRecord} with {@code id: string} (required) and
+     *       {@code revision: option<u64>} (optional) — wf_document
+     *       v1.0+ {@code doc-ref} shape. Extra fields are ignored
+     *       (forward-compat).</li>
+     * </ul>
+     * Returns {@code null} when {@code doc} is missing or an
+     * unrecognised shape; a missing {@code id} on a record throws.
+     * Mirrors {@code oxigraph-wf/src/wf_call.rs::flatten_hit_doc}.
+     */
+    static DocRefFlat flattenHitDoc(final WitValue doc) {
+        if (doc instanceof WitString) {
+            return new DocRefFlat(((WitString) doc).getValue(), null);
+        }
+        if (doc instanceof WitRecord) {
+            final Map<String, WitValue> fields = ((WitRecord) doc).getFields();
+            final WitValue idVal = fields.get("id");
+            if (!(idVal instanceof WitString)) {
+                throw new IllegalArgumentException(
+                        "hit.doc record missing `id` field or wrong type: " + idVal);
+            }
+            final String id = ((WitString) idVal).getValue();
+            Long revision = null;
+            final WitValue revVal = fields.get("revision");
+            if (revVal instanceof WitOption) {
+                final Optional<WitValue> inner = ((WitOption) revVal).getValue();
+                if (inner.isPresent()) {
+                    final WitValue rv = inner.get();
+                    if (rv instanceof WitU64) revision = ((WitU64) rv).getValue();
+                    else if (rv instanceof WitS64) {
+                        final long n = ((WitS64) rv).getValue();
+                        if (n < 0) throw new IllegalArgumentException(
+                                "hit.doc.revision negative: " + n);
+                        revision = n;
+                    } else if (rv instanceof WitU32) {
+                        revision = (long) ((WitU32) rv).getValue();
+                    } else if (rv instanceof WitS32) {
+                        final int n = ((WitS32) rv).getValue();
+                        if (n < 0) throw new IllegalArgumentException(
+                                "hit.doc.revision negative: " + n);
+                        revision = (long) n;
+                    } else {
+                        throw new IllegalArgumentException(
+                                "hit.doc.revision inner not a u64: " + rv);
+                    }
+                }
+            }
+            return new DocRefFlat(id, revision);
+        }
         return null;
     }
 
