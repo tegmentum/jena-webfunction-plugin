@@ -47,15 +47,27 @@ public final class JenaWasmInstance implements Closeable {
 
     private static volatile Engine SHARED_ENGINE;
     private static final Object ENGINE_LOCK = new Object();
-    private static final ConcurrentHashMap<URL, Component> COMPONENT_CACHE =
+    /**
+     * Compiled component cache, keyed by {@link #cacheKeyFor(URL)} rather
+     * than the raw URL so that a rebuilt {@code file://} guest produces a
+     * distinct slot (the key folds in source mtime). Mirrors the
+     * content-blindness fix on the Rust engines
+     * (oxigraph-wf {@code d9969ed} / qlever-wf-runtime {@code 37bc02e}):
+     * URL-only keys silently returned yesterday's bytes after a
+     * {@code cargo build}, and long-running JVM hosts (Fuseki, dev
+     * server) never noticed the guest had changed.
+     */
+    private static final ConcurrentHashMap<String, Component> COMPONENT_CACHE =
             new ConcurrentHashMap<>();
     /**
      * Resolved auto-detected entry-point name, cached per URL so we only
      * enumerate the component's top-level function exports on the first
      * invocation. Explicit {@code InvokeSpec.entryPoint} overrides bypass
-     * this cache entirely.
+     * this cache entirely. Same content-aware key as
+     * {@link #COMPONENT_CACHE} — a rebuilt guest can legitimately expose
+     * a new set of exports and we must not memoise the stale resolution.
      */
-    private static final ConcurrentHashMap<URL, String> ENTRY_POINT_CACHE =
+    private static final ConcurrentHashMap<String, String> ENTRY_POINT_CACHE =
             new ConcurrentHashMap<>();
 
     private final URL wasmUrl;
@@ -262,20 +274,56 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     private static Component componentFor(final URL wasmUrl) throws IOException {
-        Component cached = COMPONENT_CACHE.get(wasmUrl);
+        // Content-aware key: file:// URLs get their source mtime folded
+        // in so rebuilding a guest on disk invalidates the slot instead
+        // of silently returning stale bytes.
+        final String key = cacheKeyFor(wasmUrl);
+        Component cached = COMPONENT_CACHE.get(key);
         if (cached != null) return cached;
         // computeIfAbsent inside a try — surface IOExceptions cleanly.
         final Engine engine = sharedEngine();
         try {
-            return COMPONENT_CACHE.computeIfAbsent(wasmUrl, u -> {
+            return COMPONENT_CACHE.computeIfAbsent(key, k -> {
                 try {
-                    return engine.loadComponent(readAll(u));
+                    return engine.loadComponent(readAll(wasmUrl));
                 } catch (IOException ioe) {
                     throw new UncheckedIOException(ioe);
                 }
             });
         } catch (UncheckedIOException e) {
             throw e.getCause();
+        }
+    }
+
+    /**
+     * Derive the component cache key for {@code wasmUrl}. HTTP/HTTPS/
+     * IPFS/IPNS URLs return their string form unchanged — HTTP because
+     * v0.1 doesn't honour Cache-Control/ETag anyway (every cold-cache
+     * lookup already re-fetches), IPFS/IPNS because the content address
+     * is baked into the URL itself. For {@code file://} URLs the source
+     * mtime nanos are appended so a rewrite produces a distinct key.
+     *
+     * <p>Missing / unreadable files fall through to the bare URL so the
+     * subsequent fetch surfaces the honest error (rather than us
+     * silently miscaching a stub key). Mirrors
+     * {@code oxigraph-wf/src/wf_call.rs::cache_key_for} and
+     * {@code qlever-wf-runtime}'s {@code cache_key_for_url}.
+     */
+    static String cacheKeyFor(final URL wasmUrl) {
+        final String url = wasmUrl.toString();
+        if (!"file".equalsIgnoreCase(wasmUrl.getProtocol())) {
+            return url;
+        }
+        try {
+            final java.nio.file.Path p = java.nio.file.Paths.get(wasmUrl.toURI());
+            if (!java.nio.file.Files.exists(p)) {
+                return url;
+            }
+            final java.nio.file.attribute.FileTime ft =
+                    java.nio.file.Files.getLastModifiedTime(p);
+            return url + "#mtime=" + ft.to(java.util.concurrent.TimeUnit.NANOSECONDS);
+        } catch (Exception ignored) {
+            return url;
         }
     }
 
@@ -942,8 +990,8 @@ public final class JenaWasmInstance implements Closeable {
         if (override != null && !override.isEmpty()) {
             return override;
         }
-        return ENTRY_POINT_CACHE.computeIfAbsent(this.wasmUrl, u ->
-                resolveEntryPoint(null, instance.exportedFunctions(), u.toString()));
+        return ENTRY_POINT_CACHE.computeIfAbsent(cacheKeyFor(this.wasmUrl), k ->
+                resolveEntryPoint(null, instance.exportedFunctions(), this.wasmUrl.toString()));
     }
 
     /**
