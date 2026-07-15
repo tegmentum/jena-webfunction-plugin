@@ -421,14 +421,15 @@ public class TestWfSearchRewrite {
 
     @Test
     public void optsJsonIncludesRequiredWitFields() {
-        // The wf_document WIT `search-opts` record declares `fields:
-        // list<string>` and `highlight: bool` as non-optional (memo §04,
+        // The wf_document WIT `search-opts` record declares three
+        // non-optional bool/list fields — `fields: list<string>`,
+        // `highlight: bool`, and `include-body: bool` (memo §04,
         // `wf-document.wit` v1.3). The substrate coercer errors out on
-        // a missing required field before the dispatch reaches the
+        // any missing required field before the dispatch reaches the
         // guest ("arg 4 of `search`: record missing required field
-        // `fields`"), so every wf_document opts_json emission must
-        // include both. Parallel guard to the wf_fulltext test of the
-        // same name.
+        // `<name>`"), so every wf_document opts_json emission must
+        // include all three. Parallel guard to the wf_fulltext test of
+        // the same name.
         final DocumentRegistry reg = manualsRegistry();
         final InvokeRegistry inv = new InvokeRegistry();
         final Op input = parseAlgebra(""
@@ -443,9 +444,56 @@ public class TestWfSearchRewrite {
 
         final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
         assertThat(optsJsonArg(spec))
-                .as("opts_json must include the WIT-required `fields` and `highlight` defaults")
+                .as("opts_json must include the WIT-required `fields`, `highlight`, and `include-body` defaults")
                 .contains("\"fields\":[]")
-                .contains("\"highlight\":false");
+                .contains("\"highlight\":false")
+                .contains("\"include-body\":false");
+    }
+
+    @Test
+    public void optsJsonSnakeIncludeBodyUrlBecomesKebabWitKey() {
+        // URL query params are conventionally snake_case
+        // (`?include_body=true`) but the WIT `search-opts` record
+        // declares fields kebab-case (`include-body`). The emitter
+        // must translate on the way in — otherwise the marshaller
+        // fails with "record missing required field `include-body`".
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc WHERE {\n"
+                + "  SERVICE <wf-search:manuals?include_body=true> {\n"
+                + "    ?_ wf:query \"waterproof\" ; wf:doc ?doc .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        assertThat(hasWfInvokeService(out)).isTrue();
+
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(optsJsonArg(spec))
+                .as("URL ?include_body=true must emit kebab-case JSON key")
+                .contains("\"include-body\":true")
+                .doesNotContain("\"include_body\":");
+    }
+
+    @Test
+    public void optsJsonUrlFieldsPlaceholder() {
+        // Guard on existing behavior: `?fields=` isn't currently a
+        // whitelisted URL opt, so the emitted opts_json falls back to
+        // the WIT-required default `fields:[]`. Documents parity with
+        // the sibling Oxigraph / QLever / RDF4J tests.
+        final DocumentRegistry reg = manualsRegistry();
+        final InvokeRegistry inv = new InvokeRegistry();
+        final Op input = parseAlgebra(""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?doc WHERE {\n"
+                + "  SERVICE <wf-search:manuals> {\n"
+                + "    ?_ wf:query \"waterproof\" ; wf:doc ?doc .\n"
+                + "  }\n"
+                + "}");
+        final Op out = WfSearchRewrite.rewrite(input, reg, inv);
+        final InvokeRegistry.InvokeSpec spec = takeFirstInvoke(inv);
+        assertThat(optsJsonArg(spec)).contains("\"fields\":[]");
     }
 
     @Test

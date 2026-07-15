@@ -360,21 +360,161 @@ public final class JenaWasmInstance implements Closeable {
                         == ai.tegmentum.wasmtime4j.component.ComponentType.LIST) {
             return new Object[] { WitValueMarshaller.toWitArgs(args) };
         }
-        if (params.size() != args.length) {
+        // Positional-limit fold: mirrors oxigraph-wf's
+        // `maybe_fold_positional_limit`. An explicit
+        // `wf:partial(<WASM>, ..., <limit>, <opts_json>)` callsite ships
+        // one more positional arg than a guest whose trailing param is
+        // an opts record where `limit` lives inside that record (the
+        // wf_document `search-opts` shape — memo §04). The URL-sugar
+        // rewrite path already hoists positional `limit` into opts_json
+        // (7fc1f4c); the explicit `wf:partial` dispatch must do the
+        // equivalent here so both callsites reach the guest with the
+        // same 5-arg shape.
+        final Node[] foldedArgs = maybeFoldPositionalLimit(params, args);
+        if (params.size() != foldedArgs.length) {
             throw new IOException("arg count mismatch for `" + entry + "`: guest expects "
-                    + params.size() + " positional params, callsite supplied " + args.length);
+                    + params.size() + " positional params, callsite supplied " + foldedArgs.length);
         }
         final Object[] out = new Object[params.size()];
         for (int i = 0; i < params.size(); i++) {
             try {
                 out[i] = coerceNodeToWit(
-                        args[i],
+                        foldedArgs[i],
                         params.get(i).type());
             } catch (RuntimeException e) {
                 throw new IOException("arg " + i + " of `" + entry + "`: " + e.getMessage(), e);
             }
         }
         return out;
+    }
+
+    /**
+     * Detect the `wf:partial(..., <limit>, <opts_json>)` callsite that
+     * supplies one more positional arg than the guest's typed signature
+     * declares, and fold the extra scalar into the trailing opts record
+     * so the marshaller can proceed with the guest's canonical shape.
+     *
+     * <p>Trigger conditions (all must hold):
+     * <ul>
+     *   <li>{@code args.length == params.size() + 1} — exactly one extra arg</li>
+     *   <li>The last param is a record with a {@code limit} field of numeric or
+     *       option&lt;numeric&gt; shape</li>
+     *   <li>The second-to-last arg is a numeric lexical form (parseable as long)</li>
+     *   <li>The last arg is a literal that parses as a JSON object</li>
+     * </ul>
+     *
+     * <p>When triggered: merge the positional limit into the opts JSON
+     * (an explicit `limit` in the opts wins over the positional — same
+     * `or_insert_with` semantics as the URL-sugar path), rebuild the
+     * args array with the positional limit dropped and the opts slot
+     * replaced with the merged JSON literal.
+     *
+     * <p>When any condition fails: return the input unchanged. The
+     * downstream arg-count check produces the honest error.
+     *
+     * <p>Mirrors oxigraph-wf's `maybe_fold_positional_limit`.
+     */
+    static Node[] maybeFoldPositionalLimit(
+            final List<ai.tegmentum.wasmtime4j.component.ComponentItemInfo.NamedType> params,
+            final Node[] args) {
+        if (args.length != params.size() + 1) {
+            return args;
+        }
+        if (params.isEmpty()) {
+            return args;
+        }
+        final ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor lastParam =
+                params.get(params.size() - 1).type();
+        if (lastParam.getType() != ai.tegmentum.wasmtime4j.component.ComponentType.RECORD) {
+            return args;
+        }
+        final java.util.Map<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> fields =
+                lastParam.getRecordFields();
+        final ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor limitField = fields.get("limit");
+        if (limitField == null || !isNumericOrOptionNumeric(limitField)) {
+            return args;
+        }
+        final int limitIdx = args.length - 2;
+        final int optsIdx = args.length - 1;
+        final long limitVal;
+        try {
+            // lexicalOf throws IllegalArgumentException for unsupported
+            // Node kinds; Long.parseLong throws its subclass
+            // NumberFormatException. Catch the parent — a single
+            // catch covers both without triggering javac's multi-catch
+            // subclass warning.
+            limitVal = Long.parseLong(lexicalOf(args[limitIdx]));
+        } catch (IllegalArgumentException e) {
+            return args;
+        }
+        final String optsLex;
+        try {
+            optsLex = lexicalOf(args[optsIdx]);
+        } catch (IllegalArgumentException e) {
+            return args;
+        }
+        final String merged = mergePositionalLimitIntoOptsJson(optsLex, limitVal);
+        if (merged == null) {
+            return args;
+        }
+        final Node[] out = new Node[params.size()];
+        for (int i = 0, w = 0; i < args.length; i++) {
+            if (i == limitIdx) {
+                continue;
+            }
+            if (i == optsIdx) {
+                out[w++] = org.apache.jena.graph.NodeFactory.createLiteralString(merged);
+            } else {
+                out[w++] = args[i];
+            }
+        }
+        return out;
+    }
+
+    private static boolean isNumericOrOptionNumeric(
+            final ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor d) {
+        final ai.tegmentum.wasmtime4j.component.ComponentType kind = d.getType();
+        if (kind == ai.tegmentum.wasmtime4j.component.ComponentType.OPTION) {
+            return isNumericOrOptionNumeric(d.getOptionType());
+        }
+        switch (kind) {
+            case S8: case U8: case S16: case U16:
+            case S32: case U32: case S64: case U64:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Pure JSON merge: parse {@code optsLex} as an object, insert
+     * {@code "limit": <value>} if not already present, re-serialize.
+     * Returns {@code null} when the input isn't a JSON object or the
+     * re-serialize fails. An explicit `limit` key in the opts blob
+     * wins over the positional (matches the URL-sugar path's
+     * `or_insert_with` semantics). Split out for unit-testability.
+     * Mirrors oxigraph-wf's helper of the same shape.
+     */
+    static String mergePositionalLimitIntoOptsJson(final String optsLex, final long limit) {
+        // jena-arq's `JSON.parseAny` can throw both `JsonException` on
+        // syntax errors and — on some inputs like an empty string — a
+        // `NullPointerException` from its underlying tokenizer. Catch
+        // `RuntimeException` so both branches decline the fold cleanly
+        // instead of leaking through to the caller.
+        try {
+            final org.apache.jena.atlas.json.JsonValue parsed =
+                    org.apache.jena.atlas.json.JSON.parseAny(optsLex);
+            if (parsed == null || !parsed.isObject()) {
+                return null;
+            }
+            final org.apache.jena.atlas.json.JsonObject obj = parsed.getAsObject();
+            if (!obj.hasKey("limit")) {
+                obj.put("limit", org.apache.jena.atlas.json.JsonNumber.value(limit));
+            }
+            return obj.toString();
+        } catch (RuntimeException e) {
+            return null;
+        }
     }
 
     /**

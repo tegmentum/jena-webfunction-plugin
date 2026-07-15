@@ -738,9 +738,9 @@ public final class WfSearchRewrite {
 
     /**
      * Query-time opts JSON, hand-built for a stable, testable key order:
-     * {@code {"limit":N[,"offset":N][,"highlight":true|false][,"lang":"..."]
-     * [,"filter":"..."][,"include_body":true|false][,"after":"..."]
-     * [,"before":"..."][,"at_time":"..."][,"at_rev":N]}}.
+     * {@code {"limit":N,"fields":[][,"offset":N],"highlight":true|false
+     * [,"lang":"..."][,"filter":"..."],"include-body":true|false
+     * [,"after":"..."][,"before":"..."][,"at_time":"..."][,"at_rev":N]}}.
      *
      * <p>The {@code at_time}/{@code at_rev} bake-in is the whole point of
      * the sugar — the URL's {@code @time-spec} winds up here so the guest
@@ -748,6 +748,14 @@ public final class WfSearchRewrite {
      * {@code after}/{@code before} ride in the same slot; they and
      * {@code at_time}/{@code at_rev} are mutually exclusive by the parser
      * (a URL that mixes them fails to parse).
+     *
+     * <p>Snake→kebab key mapping: URL query params are conventionally
+     * snake_case (`?include_body=`) but the wf_document `search-opts`
+     * WIT record declares its fields kebab-case (`include-body`). The
+     * substrate marshaller looks up record fields by verbatim WIT name,
+     * so a snake-case JSON key becomes a silent drop (option field) or
+     * a missing-required-field error (`include-body`). Emit kebab-case
+     * unconditionally so the guest sees the record it declared.
      */
     private static String buildOptsJson(final ParsedUrl parsed, final int limit,
                                         final boolean projectsSnippet) {
@@ -770,7 +778,14 @@ public final class WfSearchRewrite {
         appendBoolWithDefault(sb, parsed.opts.get("highlight"), "highlight", projectsSnippet);
         appendStrIfPresent(sb, parsed.opts.get("lang"), "lang");
         appendStrIfPresent(sb, parsed.opts.get("filter"), "filter");
-        appendBoolIfPresent(sb, parsed.opts.get("include_body"), "include_body");
+        // Third WIT-required non-option field: `include-body: bool`
+        // (`wf-document.wit` v1.3). Always emit — same pattern as
+        // `highlight` above — because the marshaller errors with
+        // "record missing required field `include-body`" otherwise.
+        // Note the JSON key is kebab-case (`include-body`) even though
+        // the URL param is snake_case (`?include_body=true`): the WIT
+        // record's field name is the source of truth for the JSON key.
+        appendBoolWithDefault(sb, parsed.opts.get("include_body"), "include-body", false);
         appendStrIfPresent(sb, parsed.opts.get("after"), "after");
         appendStrIfPresent(sb, parsed.opts.get("before"), "before");
         if (parsed.atTime != null) {
