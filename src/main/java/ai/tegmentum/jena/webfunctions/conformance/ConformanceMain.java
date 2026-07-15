@@ -1,6 +1,9 @@
 package ai.tegmentum.jena.webfunctions.conformance;
 
+import ai.tegmentum.jena.webfunctions.CallbackContext;
+import ai.tegmentum.jena.webfunctions.JenaWasmInstance;
 import ai.tegmentum.jena.webfunctions.WebFunctionInit;
+import ai.tegmentum.jena.webfunctions.WitValueMarshaller;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasMap;
 import ai.tegmentum.jena.webfunctions.rewrite.AliasRewriteState;
 import ai.tegmentum.jena.webfunctions.rewrite.ConversionRegistry;
@@ -31,10 +34,13 @@ import org.apache.jena.sparql.core.DatasetGraph;
 import org.apache.jena.sparql.core.DatasetGraphFactory;
 import org.apache.jena.sparql.core.Var;
 import org.apache.jena.sparql.engine.ResultSetStream;
+import org.apache.jena.graph.NodeFactory;
 import org.apache.jena.sparql.engine.binding.Binding;
 import org.apache.jena.sparql.engine.binding.BindingBuilder;
 
 import java.io.PrintStream;
+import java.net.URI;
+import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -113,6 +119,22 @@ public final class ConformanceMain {
      * messages.
      */
     public static int run(final String[] args, final PrintStream out, final PrintStream err) throws Exception {
+        // The canonicalize-sweep CLI mode is mutually exclusive with the
+        // normal query pipeline: it loads wf_canonicalize.wasm directly,
+        // dispatches one sweep, and exits — no dataset load, no SPARQL
+        // parse. Detect it BEFORE parseArgs because parseArgs enforces
+        // value-per-flag and would reject the valueless
+        // `--canonicalize-sweep`. Mirrors the oxigraph-wf
+        // `/admin/canonicalize-sweep` endpoint for JVM engines that
+        // don't run a persistent HTTP server.
+        if (containsFlag(args, "--canonicalize-sweep")) {
+            final String sweepCfg = valueFor(args, "--sweep-config");
+            if (sweepCfg == null) {
+                err.println("--sweep-config <path> required with --canonicalize-sweep");
+                return 2;
+            }
+            return runCanonicalizeSweep(Paths.get(sweepCfg), out, err);
+        }
         final Map<String, String> parsed = parseArgs(args);
         final Path dataPath = requirePathArg(parsed, "--data");
         final Path queryPath = requirePathArg(parsed, "--query");
@@ -483,6 +505,140 @@ public final class ConformanceMain {
             if (!obj.hasKey("boolean")) return false;
             return obj.get("boolean").getAsBoolean().value();
         };
+    }
+
+    // ---------------------------------------------------------------
+    // Canonicalize-sweep CLI mode
+    // ---------------------------------------------------------------
+
+    /**
+     * In-process replacement for oxigraph-wf's
+     * {@code POST /admin/canonicalize-sweep} endpoint. The JVM engines
+     * are one-shot CLI shapes with no persistent HTTP surface, so the
+     * wf-conformance harness triggers the sweep by re-invoking
+     * {@code ConformanceMain} with {@code --canonicalize-sweep}.
+     *
+     * <p>The sweep config file is a JSON blob mirroring
+     * {@code build_canonicalize_sweep_config} in oxigraph-wf, with one
+     * extra top-level field:
+     * <ul>
+     *   <li>{@code canonicalize_wasm_url} — {@code file://} / {@code http://}
+     *       URL of the wf_canonicalize.wasm component to load. Stripped
+     *       from the payload before it reaches the guest.</li>
+     * </ul>
+     * The rest ({@code sink}, {@code rule}, {@code fulltext_indexes},
+     * {@code document_indexes}, {@code full_scan}) is passed through
+     * verbatim as a string literal into the guest's {@code evaluate}
+     * export — same shape the oxigraph endpoint uses.
+     *
+     * <p>On success prints {@code {"status":"ok","processed":N}} to
+     * stdout and returns 0. {@code N} is the sum of numeric literal
+     * cells in the guest's first result row (typical shape:
+     * {@code (canonicalized: int, documents: int)}). On failure returns
+     * a non-zero code with the error message on stderr.
+     */
+    private static int runCanonicalizeSweep(final Path sweepCfgPath,
+                                            final PrintStream out,
+                                            final PrintStream err) {
+        final JsonObject cfg;
+        try {
+            cfg = JSON.parse(Files.readString(sweepCfgPath)).getAsObject();
+        } catch (Exception e) {
+            err.println("sweep config error: " + e.getMessage());
+            return 2;
+        }
+        if (!cfg.hasKey("canonicalize_wasm_url")) {
+            err.println("sweep config error: missing `canonicalize_wasm_url`");
+            return 2;
+        }
+        final String wasmUrl = cfg.get("canonicalize_wasm_url").getAsString().value();
+
+        // Guest sees everything except our CLI-side wiring field.
+        final JsonObject guest = new JsonObject();
+        for (String k : cfg.keys()) {
+            if ("canonicalize_wasm_url".equals(k)) continue;
+            guest.put(k, cfg.get(k));
+        }
+        final String guestCfgJson = guest.toString();
+
+        // Bind a CallbackContext so the guest's sink-open / sink-execute
+        // / sink-close callbacks can reach a handle table. The sweep
+        // guest doesn't touch the graph — it opens SQLite sinks and
+        // POSTs to Manticore — so an empty DatasetGraph is fine here.
+        final DatasetGraph emptyDsg = DatasetGraphFactory.createTxnMem();
+        final CallbackContext cbCtx = CallbackContext.bind(new SweepFunctionEnv(emptyDsg));
+
+        long processed = 0;
+        try {
+            final URL wasm = URI.create(wasmUrl).toURL();
+            try (JenaWasmInstance instance = new JenaWasmInstance(wasm)) {
+                final org.apache.jena.graph.Node cfgLit =
+                        NodeFactory.createLiteralString(guestCfgJson);
+                final List<WitValueMarshaller.Row> rows = instance.evaluate(cfgLit);
+                if (!rows.isEmpty()) {
+                    for (org.apache.jena.graph.Node v : rows.get(0).values) {
+                        if (v != null && v.isLiteral()) {
+                            try {
+                                processed += Long.parseLong(v.getLiteralLexicalForm());
+                            } catch (NumberFormatException ignore) {
+                                // Non-numeric literal (e.g. a status
+                                // string) — skip it; only numeric cells
+                                // contribute to the processed count.
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            err.println("canonicalize sweep failed: " + e.getMessage());
+            e.printStackTrace(err);
+            return 3;
+        } finally {
+            CallbackContext.unbindIfOutermost(cbCtx);
+        }
+
+        out.print("{\"status\":\"ok\",\"processed\":");
+        out.print(processed);
+        out.println("}");
+        out.flush();
+        return 0;
+    }
+
+    /**
+     * Minimal {@link org.apache.jena.sparql.function.FunctionEnv}
+     * implementation for the sweep-mode CallbackContext bind.
+     * {@link CallbackContext#bind(org.apache.jena.sparql.function.FunctionEnv)}
+     * only consults {@code getDataset()} at bind time, but the interface
+     * is 3-method so we implement the other two with sensible defaults
+     * (ARQ global context, dataset's default graph). The sweep guest
+     * doesn't reach these — the only host callbacks it exercises are
+     * the sink handles — but the interface contract requires them.
+     */
+    private static final class SweepFunctionEnv
+            implements org.apache.jena.sparql.function.FunctionEnv {
+        private final DatasetGraph dsg;
+        SweepFunctionEnv(final DatasetGraph dsg) { this.dsg = dsg; }
+        @Override public org.apache.jena.graph.Graph getActiveGraph() {
+            return dsg.getDefaultGraph();
+        }
+        @Override public DatasetGraph getDataset() { return dsg; }
+        @Override public org.apache.jena.sparql.util.Context getContext() {
+            return org.apache.jena.query.ARQ.getContext();
+        }
+    }
+
+    private static boolean containsFlag(final String[] args, final String flag) {
+        for (String a : args) {
+            if (flag.equals(a)) return true;
+        }
+        return false;
+    }
+
+    private static String valueFor(final String[] args, final String flag) {
+        for (int i = 0; i < args.length - 1; i++) {
+            if (flag.equals(args[i])) return args[i + 1];
+        }
+        return null;
     }
 
     // ---------------------------------------------------------------
