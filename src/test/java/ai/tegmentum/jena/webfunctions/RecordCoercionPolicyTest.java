@@ -127,4 +127,88 @@ public class RecordCoercionPolicyTest {
         assertTrue(emptyString instanceof WitString);
         assertEquals("", ((WitString) emptyString).getValue());
     }
+
+    /**
+     * Snake-case JSON key {@code include_body} resolves for a kebab
+     * WIT field name {@code include-body}. This is the
+     * {@code document_federated} / {@code document_managed} callsite's
+     * exact shape — user JSON uses snake, WIT declares kebab.
+     */
+    @Test
+    public void snakeJsonKeyResolvesForKebabWitField() {
+        final org.apache.jena.atlas.json.JsonObject obj =
+                JSON.parseAny("{\"include_body\": true}").getAsObject();
+        final org.apache.jena.atlas.json.JsonValue v =
+                JenaWasmInstance.lookupRecordField(obj, "include-body");
+        assertNotNull("snake fallback should resolve", v);
+        assertTrue(v.getAsBoolean().value());
+    }
+
+    /**
+     * Exact WIT-name match wins over the snake fallback. If a user
+     * supplies BOTH spellings, the kebab-spelled key is the one that
+     * binds — a caller who wrote the WIT name verbatim gets exactly
+     * what they asked for.
+     */
+    @Test
+    public void exactKebabMatchWinsOverSnakeFallback() {
+        final org.apache.jena.atlas.json.JsonObject obj =
+                JSON.parseAny("{\"include_body\": true, \"include-body\": false}").getAsObject();
+        final org.apache.jena.atlas.json.JsonValue v =
+                JenaWasmInstance.lookupRecordField(obj, "include-body");
+        assertNotNull(v);
+        assertFalse("exact kebab match should win", v.getAsBoolean().value());
+    }
+
+    @Test
+    public void noDashWitNameTakesOnlyExactPath() {
+        final org.apache.jena.atlas.json.JsonObject obj =
+                JSON.parseAny("{\"limit\": 20}").getAsObject();
+        final org.apache.jena.atlas.json.JsonValue v =
+                JenaWasmInstance.lookupRecordField(obj, "limit");
+        assertNotNull(v);
+        assertEquals(20, v.getAsNumber().value().intValue());
+    }
+
+    @Test
+    public void returnsNullWhenNeitherSpellingPresent() {
+        final org.apache.jena.atlas.json.JsonObject obj =
+                JSON.parseAny("{\"other\": 1}").getAsObject();
+        assertEquals(null, JenaWasmInstance.lookupRecordField(obj, "include-body"));
+    }
+
+    /**
+     * Missing required {@code list<T>} synthesizes to an empty list —
+     * the fix that unblocks {@code document_federated} /
+     * {@code document_managed} where user JSON drops
+     * {@code "fields": []} entirely and the decoder now supplies it.
+     */
+    @Test
+    public void missingRequiredListSynthesizesEmpty() {
+        final WitValue emptyList = JenaWasmInstance.defaultValFor(
+                ComponentTypeDescriptor.list(ComponentTypeDescriptor.string()));
+        assertTrue("expected WitList, got " + emptyList.getClass(), emptyList instanceof WitList);
+        assertEquals(0, ((WitList) emptyList).size());
+    }
+
+    /**
+     * A record-typed required field (or any other non-defaultable
+     * type) still throws — the substrate does not fabricate structured
+     * values. Kept to lock down the failure mode so the extended
+     * default-synth policy doesn't silently produce garbage for a
+     * nested-record slot.
+     */
+    @Test
+    public void missingRequiredNonDefaultableRecordErrors() {
+        final java.util.LinkedHashMap<String, ComponentTypeDescriptor> nestedFields =
+                new java.util.LinkedHashMap<>();
+        nestedFields.put("x", ComponentTypeDescriptor.s32());
+        final ComponentTypeDescriptor nestedRecord =
+                ComponentTypeDescriptor.record(nestedFields);
+        final IllegalArgumentException iae = assertThrows(
+                IllegalArgumentException.class,
+                () -> JenaWasmInstance.defaultValFor(nestedRecord));
+        assertNotNull(iae.getMessage());
+        assertTrue(iae.getMessage(), iae.getMessage().contains("no default-synth"));
+    }
 }

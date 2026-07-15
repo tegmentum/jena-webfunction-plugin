@@ -689,35 +689,49 @@ public final class JenaWasmInstance implements Closeable {
                 final java.util.Map<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> fields =
                         target.getRecordFields();
                 final org.apache.jena.atlas.json.JsonObject obj;
-                final boolean synthMissing;
                 if (json.isObject()) {
                     obj = json.getAsObject();
-                    synthMissing = false;
                 } else if (json.isNull()) {
                     throw new IllegalArgumentException("expected JSON object, got null");
                 } else {
                     final Object placed = placeBareArgIntoRecord(json, fields);
                     obj = new org.apache.jena.atlas.json.JsonObject();
                     obj.put((String) placed, json);
-                    synthMissing = true;
                 }
                 final ai.tegmentum.wasmtime4j.wit.WitRecord.Builder b =
                         ai.tegmentum.wasmtime4j.wit.WitRecord.builder();
                 for (java.util.Map.Entry<String, ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor> e : fields.entrySet()) {
                     final String name = e.getKey();
                     final ai.tegmentum.wasmtime4j.component.ComponentTypeDescriptor fieldTy = e.getValue();
-                    final org.apache.jena.atlas.json.JsonValue fieldJson = obj.get(name);
+                    final org.apache.jena.atlas.json.JsonValue fieldJson = lookupRecordField(obj, name);
                     if ((fieldJson == null || fieldJson.isNull())
                             && fieldTy.getType() == ai.tegmentum.wasmtime4j.component.ComponentType.OPTION) {
                         // Pass the OPTION-wrapped type, not the inner type — same
                         // reason as the OPTION branch above.
                         b.field(name, ai.tegmentum.wasmtime4j.wit.WitOption.none(
                                 witTypeOf(fieldTy)));
-                    } else if (fieldJson == null && synthMissing) {
-                        b.field(name, defaultValFor(fieldTy));
                     } else if (fieldJson == null) {
-                        throw new IllegalArgumentException(
-                                "record missing required field `" + name + "`");
+                        // Substrate-side default for a missing required
+                        // field whose type has an obvious zero (list<T>
+                        // → [], bool → false, string → "", numeric →
+                        // 0). Extends the bare-arg default-synth policy
+                        // to the "explicit JSON object with a few
+                        // missing required fields" path so user JSON
+                        // that omits e.g. `fields: []` still reaches
+                        // the guest with a valid record. Fields whose
+                        // type has no natural default (records, tuples,
+                        // variants, results, enums, flags) still throw
+                        // via `defaultValFor`, remapped to the
+                        // classic "record missing required field"
+                        // message so downstream error-shape assertions
+                        // (per-engine TestWfSearchRewrite) don't drift.
+                        // Mirrors `oxigraph-wf/src/wf_call.rs::json_to_val`.
+                        try {
+                            b.field(name, defaultValFor(fieldTy));
+                        } catch (IllegalArgumentException iae) {
+                            throw new IllegalArgumentException(
+                                    "record missing required field `" + name + "`");
+                        }
                     } else {
                         b.field(name, jsonToWit(fieldJson, fieldTy));
                     }
@@ -774,6 +788,40 @@ public final class JenaWasmInstance implements Closeable {
         throw new IllegalArgumentException(
                 "bare arg is ambiguous - matches multiple non-optional fields ("
                 + String.join(", ", candidates) + "); pass an explicit JSON object to disambiguate");
+    }
+
+    /**
+     * Look up a JSON object field for a WIT record field name. WIT
+     * field names are kebab-case (e.g. {@code include-body}); user-
+     * authored JSON literals commonly use snake_case
+     * ({@code include_body}). Policy:
+     *
+     * <ul>
+     *   <li>Exact WIT-name match wins ({@code name} verbatim).</li>
+     *   <li>On miss, if the WIT name contains a dash, try the
+     *       snake_case spelling so a user-supplied
+     *       {@code {"include_body": true}} binds to a WIT field named
+     *       {@code include-body}.</li>
+     * </ul>
+     *
+     * <p>Never rewrites in the other direction — WIT identifiers cannot
+     * contain underscores, so a kebab record field is the only case
+     * that needs the fallback. Package-private for
+     * {@link RecordCoercionPolicy}-style unit tests.
+     */
+    static org.apache.jena.atlas.json.JsonValue lookupRecordField(
+            final org.apache.jena.atlas.json.JsonObject obj,
+            final String name) {
+        if (obj.hasKey(name)) {
+            return obj.get(name);
+        }
+        if (name.indexOf('-') >= 0) {
+            final String snake = name.replace('-', '_');
+            if (obj.hasKey(snake)) {
+                return obj.get(snake);
+            }
+        }
+        return null;
     }
 
     /**
