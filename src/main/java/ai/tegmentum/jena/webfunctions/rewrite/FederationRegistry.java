@@ -467,8 +467,101 @@ public final class FederationRegistry {
             cardinalityHints = Map.of();
         }
 
+        final Optional<RelationalConfig> relationalConfig;
+        if (hasNonNull(raw, "relational")) {
+            final JsonValue rel = raw.get("relational");
+            if (!rel.isObject()) {
+                throw new IllegalArgumentException(
+                        "federation registry source `" + name
+                                + "`: `relational` must be an object");
+            }
+            relationalConfig = Optional.of(parseRelationalConfig(name, rel.getAsObject()));
+        } else {
+            relationalConfig = Optional.empty();
+        }
+
         return new FederationSource(name, type, endpoint, predicates, probeTtl,
-                silent, cardinalityHint, cardinalityHints);
+                silent, cardinalityHint, cardinalityHints, relationalConfig);
+    }
+
+    /**
+     * Parse the {@code relational} extension block into a
+     * {@link RelationalConfig}. Rejects a descriptor missing any of the
+     * three required fields (sink_kind / table / subject_column) so
+     * malformed configs fail loudly at load time rather than silently at
+     * plan time; that matches the base parser's fail-loud rules for
+     * required source fields.
+     */
+    private static RelationalConfig parseRelationalConfig(final String sourceName,
+                                                          final JsonObject obj) {
+        final String sinkKind = requiredString(sourceName, obj, "sink_kind");
+        final String table = requiredString(sourceName, obj, "table");
+        final String subjectColumn = requiredString(sourceName, obj, "subject_column");
+
+        final String anchorClass;
+        if (hasNonNull(obj, "anchor") && obj.get("anchor").isObject()) {
+            final JsonObject a = obj.get("anchor").getAsObject();
+            if (hasNonNull(a, "class") && a.get("class").isString()) {
+                anchorClass = a.get("class").getAsString().value();
+            } else {
+                anchorClass = null;
+            }
+        } else {
+            anchorClass = null;
+        }
+
+        final List<Column> columns = new ArrayList<>();
+        if (obj.hasKey("columns") && obj.get("columns").isArray()) {
+            for (JsonValue cv : obj.get("columns").getAsArray()) {
+                if (!cv.isObject()) continue;
+                final JsonObject co = cv.getAsObject();
+                final String colName = hasNonNull(co, "name") && co.get("name").isString()
+                        ? co.get("name").getAsString().value() : null;
+                final String role = hasNonNull(co, "role") && co.get("role").isString()
+                        ? co.get("role").getAsString().value() : null;
+                if (colName == null || role == null) continue;
+                final String predicate = hasNonNull(co, "predicate") && co.get("predicate").isString()
+                        ? co.get("predicate").getAsString().value() : null;
+                final String xsdType = hasNonNull(co, "type") && co.get("type").isString()
+                        ? co.get("type").getAsString().value() : null;
+                columns.add(new Column(colName, role, predicate, xsdType));
+            }
+        }
+
+        final String iriTemplate;
+        if (hasNonNull(obj, "iri_template") && obj.get("iri_template").isString()) {
+            iriTemplate = obj.get("iri_template").getAsString().value();
+        } else {
+            iriTemplate = null;
+        }
+
+        final boolean emitProvenance;
+        if (hasNonNull(obj, "emit_provenance") && obj.get("emit_provenance").isBoolean()) {
+            emitProvenance = obj.get("emit_provenance").getAsBoolean().value();
+        } else {
+            emitProvenance = false;
+        }
+
+        final String schemaVersion;
+        if (hasNonNull(obj, "schema_version") && obj.get("schema_version").isString()) {
+            schemaVersion = obj.get("schema_version").getAsString().value();
+        } else {
+            schemaVersion = null;
+        }
+
+        return new RelationalConfig(sinkKind, table, subjectColumn,
+                anchorClass, columns, iriTemplate, emitProvenance, schemaVersion);
+    }
+
+    private static String requiredString(final String sourceName,
+                                         final JsonObject obj,
+                                         final String field) {
+        if (!hasNonNull(obj, field) || !obj.get(field).isString()) {
+            throw new IllegalArgumentException(
+                    "federation registry source `" + sourceName
+                            + "`: `relational." + field + "` is required");
+        }
+        return obj.get(field).getAsString().value();
     }
 
     private static SourceType parseType(final String name, final String typeStr) {
@@ -587,6 +680,7 @@ public final class FederationRegistry {
         private final Optional<Boolean> silent;
         private final OptionalLong cardinalityHint;
         private final Map<String, Long> cardinalityHints;
+        private final Optional<RelationalConfig> relationalConfig;
 
         /**
          * Legacy five-arg constructor kept for callers that don't need
@@ -600,7 +694,8 @@ public final class FederationRegistry {
                                 final List<String> predicates,
                                 final OptionalInt probeTtlSecs) {
             this(name, sourceType, endpoint, predicates, probeTtlSecs,
-                    Optional.empty(), OptionalLong.empty(), Map.of());
+                    Optional.empty(), OptionalLong.empty(), Map.of(),
+                    Optional.empty());
         }
 
         /**
@@ -615,7 +710,24 @@ public final class FederationRegistry {
                                 final OptionalInt probeTtlSecs,
                                 final Optional<Boolean> silent) {
             this(name, sourceType, endpoint, predicates, probeTtlSecs,
-                    silent, OptionalLong.empty(), Map.of());
+                    silent, OptionalLong.empty(), Map.of(), Optional.empty());
+        }
+
+        /**
+         * Legacy eight-arg constructor kept for callers that don't
+         * ship a {@link RelationalConfig}. Delegates to the full
+         * constructor with {@link Optional#empty()}.
+         */
+        public FederationSource(final String name,
+                                final SourceType sourceType,
+                                final String endpoint,
+                                final List<String> predicates,
+                                final OptionalInt probeTtlSecs,
+                                final Optional<Boolean> silent,
+                                final OptionalLong cardinalityHint,
+                                final Map<String, Long> cardinalityHints) {
+            this(name, sourceType, endpoint, predicates, probeTtlSecs,
+                    silent, cardinalityHint, cardinalityHints, Optional.empty());
         }
 
         public FederationSource(final String name,
@@ -625,7 +737,8 @@ public final class FederationRegistry {
                                 final OptionalInt probeTtlSecs,
                                 final Optional<Boolean> silent,
                                 final OptionalLong cardinalityHint,
-                                final Map<String, Long> cardinalityHints) {
+                                final Map<String, Long> cardinalityHints,
+                                final Optional<RelationalConfig> relationalConfig) {
             this.name = name;
             this.sourceType = sourceType;
             this.endpoint = endpoint;
@@ -634,6 +747,7 @@ public final class FederationRegistry {
             this.silent = silent;
             this.cardinalityHint = cardinalityHint;
             this.cardinalityHints = Map.copyOf(cardinalityHints);
+            this.relationalConfig = relationalConfig;
         }
 
         public String name()              { return name; }
@@ -692,5 +806,146 @@ public final class FederationRegistry {
             if (perPred != null) return OptionalLong.of(perPred);
             return cardinalityHint;
         }
+
+        /**
+         * v0.3 extension &mdash; {@code wf-relational} source shape
+         * descriptor. Populated from the JSON top-level {@code relational}
+         * key on the source entry (adapter renders it in
+         * {@code render_relational_descriptor}). {@link Optional#empty()}
+         * for every non-{@code wf-relational} source, and also for
+         * {@code wf-relational} sources that ship without a descriptor
+         * block (the {@link WfRelationalRewrite} pass short-circuits
+         * those).
+         *
+         * <p>Design memo: {@code wf-conformance/docs/design/wf-relational.md}
+         * &sect;04. Prior to v0.3 this lived in a sidecar
+         * {@code WfRelationalRegistry}; the sidecar was folded into
+         * {@code FederationSource} so all per-source state travels
+         * together. Future extension source types ({@code wf-vector},
+         * {@code wf-search}) will follow the same pattern &mdash;
+         * first-class optional field, discoverable at the type level.
+         */
+        public Optional<RelationalConfig> relationalConfig() { return relationalConfig; }
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.3 wf-relational shape descriptor.
+    //
+    // The federation-config JSON's `wf-relational` sources carry an
+    // optional `relational` block that the WfRelationalRewrite pass needs
+    // to build the wf_fetch descriptor (adapter emits it under the key
+    // `relational`). Prior to v0.3 this lived in a sibling
+    // WfRelationalRegistry that re-parsed the same file; folding it into
+    // FederationSource unifies the two registries so all per-source state
+    // travels together and future extension source types (wf-vector,
+    // wf-search) can follow the same pattern.
+    // ---------------------------------------------------------------------
+
+    /**
+     * Shape descriptor block for a {@code wf-relational} federation
+     * source. Mirrors the JSON the adapter emits under the {@code relational}
+     * key on the source entry &mdash; see
+     * {@code wf-conformance/src/adapter/mod.rs::render_relational_descriptor}.
+     *
+     * <p>Kept as a proper type (not an opaque JSON string) so the rewrite
+     * pass gets typed access to {@link #columnsByPredicate()} for the BGP
+     * fold.
+     */
+    public static final class RelationalConfig {
+        private final String sinkKind;
+        private final String table;
+        private final String subjectColumn;
+        private final Anchor anchor;
+        private final List<Column> columns;
+        private final String iriTemplate;
+        private final boolean emitProvenance;
+        private final String schemaVersion;
+
+        public RelationalConfig(final String sinkKind,
+                                final String table,
+                                final String subjectColumn,
+                                final String anchorClass,
+                                final List<Column> columns,
+                                final String iriTemplate,
+                                final boolean emitProvenance,
+                                final String schemaVersion) {
+            this.sinkKind = sinkKind;
+            this.table = table;
+            this.subjectColumn = subjectColumn;
+            this.anchor = new Anchor(anchorClass);
+            this.columns = List.copyOf(columns);
+            this.iriTemplate = iriTemplate;
+            this.emitProvenance = emitProvenance;
+            this.schemaVersion = schemaVersion;
+        }
+
+        public String sinkKind()                { return sinkKind; }
+        public String table()                   { return table; }
+        public String subjectColumn()           { return subjectColumn; }
+        public Anchor anchor()                  { return anchor; }
+        public List<Column> columns()           { return columns; }
+        public Optional<String> iriTemplate()   { return Optional.ofNullable(iriTemplate); }
+        public boolean emitProvenance()         { return emitProvenance; }
+        public Optional<String> schemaVersion() { return Optional.ofNullable(schemaVersion); }
+
+        /**
+         * Predicate IRI &rarr; column name lookup for the rewrite pass.
+         * Skips the {@code subject_iri} role (its column carries the
+         * subject binding, not a column predicate).
+         */
+        public Map<String, String> columnsByPredicate() {
+            final Map<String, String> out = new LinkedHashMap<>();
+            for (Column c : columns) {
+                if ("subject_iri".equals(c.role())) continue;
+                if (c.predicate() != null) {
+                    out.put(c.predicate(), c.name());
+                }
+            }
+            return out;
+        }
+    }
+
+    /**
+     * Anchor block on a {@link RelationalConfig}. Only the
+     * {@code class} field is meaningful today (the anchor {@code rdf:type}
+     * baked into the generated descriptor); wrapped in a type so future
+     * anchor fields (e.g. secondary indexes) have a place to land.
+     */
+    public static final class Anchor {
+        private final String anchorClass;
+
+        public Anchor(final String anchorClass) {
+            this.anchorClass = anchorClass;
+        }
+
+        /** Absent when the descriptor ships without an {@code anchor.class}. */
+        public Optional<String> anchorClass() { return Optional.ofNullable(anchorClass); }
+    }
+
+    /**
+     * One column in a {@link RelationalConfig}. {@code predicate} is
+     * absent for the {@code subject_iri} column; {@code xsdType} is
+     * optional.
+     */
+    public static final class Column {
+        private final String name;
+        private final String role;
+        private final String predicate;
+        private final String xsdType;
+
+        public Column(final String name,
+                      final String role,
+                      final String predicate,
+                      final String xsdType) {
+            this.name = name;
+            this.role = role;
+            this.predicate = predicate;
+            this.xsdType = xsdType;
+        }
+
+        public String name()      { return name; }
+        public String role()      { return role; }
+        public String predicate() { return predicate; }
+        public String xsdType()   { return xsdType; }
     }
 }

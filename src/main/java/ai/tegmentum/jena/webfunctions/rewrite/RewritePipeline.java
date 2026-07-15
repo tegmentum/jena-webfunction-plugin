@@ -49,15 +49,6 @@ public final class RewritePipeline {
         public final FulltextRegistry fulltextRegistry;
         public final DocumentRegistry documentRegistry;
         public final FederationRegistry federationRegistry;
-        /**
-         * Sidecar registry consumed by {@link WfRelationalRewrite}.
-         * Loaded from the same federation-config JSON that
-         * {@link FederationRegistry} reads &mdash; captures the
-         * per-source {@code relational} extension block the
-         * federation registry drops. May be {@code null}
-         * (treated as empty) for backwards-compat with older callers.
-         */
-        public final WfRelationalRegistry wfRelationalRegistry;
         public final String wfFetchUrl;
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -66,7 +57,7 @@ public final class RewritePipeline {
                        final ShapeRegistry shapeRegistry,
                        final String wfFetchUrl) {
             this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
-                    null, null, null, null, wfFetchUrl);
+                    null, null, null, wfFetchUrl);
         }
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -76,18 +67,7 @@ public final class RewritePipeline {
                        final FulltextRegistry fulltextRegistry,
                        final String wfFetchUrl) {
             this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
-                    fulltextRegistry, null, null, null, wfFetchUrl);
-        }
-
-        public Context(final InvokeRegistry invokeRegistry,
-                       final ConversionRegistry conversionRegistry,
-                       final AliasMap aliasMap,
-                       final ShapeRegistry shapeRegistry,
-                       final FulltextRegistry fulltextRegistry,
-                       final DocumentRegistry documentRegistry,
-                       final String wfFetchUrl) {
-            this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
-                    fulltextRegistry, documentRegistry, null, null, wfFetchUrl);
+                    fulltextRegistry, null, null, wfFetchUrl);
         }
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -96,10 +76,9 @@ public final class RewritePipeline {
                        final ShapeRegistry shapeRegistry,
                        final FulltextRegistry fulltextRegistry,
                        final DocumentRegistry documentRegistry,
-                       final FederationRegistry federationRegistry,
                        final String wfFetchUrl) {
             this(invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
-                    fulltextRegistry, documentRegistry, federationRegistry, null, wfFetchUrl);
+                    fulltextRegistry, documentRegistry, null, wfFetchUrl);
         }
 
         public Context(final InvokeRegistry invokeRegistry,
@@ -109,7 +88,6 @@ public final class RewritePipeline {
                        final FulltextRegistry fulltextRegistry,
                        final DocumentRegistry documentRegistry,
                        final FederationRegistry federationRegistry,
-                       final WfRelationalRegistry wfRelationalRegistry,
                        final String wfFetchUrl) {
             this.invokeRegistry = invokeRegistry;
             this.conversionRegistry = conversionRegistry;
@@ -118,7 +96,6 @@ public final class RewritePipeline {
             this.fulltextRegistry = fulltextRegistry;
             this.documentRegistry = documentRegistry;
             this.federationRegistry = federationRegistry;
-            this.wfRelationalRegistry = wfRelationalRegistry;
             this.wfFetchUrl = wfFetchUrl;
         }
     }
@@ -189,14 +166,15 @@ public final class RewritePipeline {
         //      emitted by WfFederationRewrite into the same
         //      SERVICE <wf:call> envelope, with the Postgres sink URL
         //      + shape descriptor baked into the descriptor literal
-        //      (wf-relational memo §04). Bridges FederationRegistry
-        //      (names the source, confirms WF_RELATIONAL type) to the
-        //      sibling WfRelationalRegistry (supplies the shape
-        //      descriptor block that FederationRegistry drops). Empty
-        //      registry or null wfFetchUrl → short-circuit; unknown
-        //      name → leave the SERVICE alone.
+        //      (wf-relational memo §04). v0.3 reads the shape descriptor
+        //      straight off the FederationSource.relationalConfig field
+        //      (folded in from the old WfRelationalRegistry sidecar).
+        //      Empty federation registry or null wfFetchUrl →
+        //      short-circuit; unknown name → leave the SERVICE alone;
+        //      wrong source type or missing relationalConfig block →
+        //      leave alone.
         cursor = WfRelationalRewrite.rewrite(cursor, ctx.federationRegistry,
-                ctx.wfRelationalRegistry, ctx.wfFetchUrl);
+                ctx.wfFetchUrl);
         // 6b. Shape rewrite — cover BGPs with SERVICE <wf:call>.
         cursor = ShapeRewrite.rewrite(cursor, ctx.shapeRegistry, ctx.wfFetchUrl);
         return new Result(cursor, aliasRes.state);

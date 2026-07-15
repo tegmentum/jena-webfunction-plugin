@@ -412,4 +412,155 @@ public class TestFederationRegistry {
         assertThatThrownBy(() -> reg.probePredicate(s, "http://ex/p"))
                 .hasMessageContaining("connection refused");
     }
+
+    // ---------------------------------------------------------------------
+    // v0.3 wf-relational extension — the `relational` block on a
+    // wf-relational source is captured on `FederationSource.relationalConfig`
+    // (no sidecar registry). Prior to v0.3 the block was dropped by
+    // FederationRegistry and re-parsed by WfRelationalRegistry; the two
+    // registries were unified so all per-source state lives together and
+    // future extension source types can follow the same pattern.
+    // ---------------------------------------------------------------------
+
+    /**
+     * The `relational` block on a `wf-relational` source parses into a
+     * populated {@link FederationRegistry.RelationalConfig} on the entry.
+     */
+    @Test
+    public void wfRelationalConfigExtensionCapturedOnSource() {
+        final FederationRegistry reg = parse("""
+                {
+                  "sources": [{
+                    "name": "customers",
+                    "type": "wf-relational",
+                    "endpoint": "postgres://user@localhost/mydb",
+                    "predicates": ["http://ex/name", "http://ex/tier"],
+                    "relational": {
+                      "sink_kind": "postgres",
+                      "table": "customers",
+                      "subject_column": "id",
+                      "anchor": {"class": "http://ex/Customer"},
+                      "columns": [
+                        {"name": "id",   "role": "subject_iri", "type": "iri"},
+                        {"name": "name", "role": "column", "type": "string",
+                         "predicate": "http://ex/name"},
+                        {"name": "tier", "role": "column", "type": "string",
+                         "predicate": "http://ex/tier"}
+                      ],
+                      "emit_provenance": true,
+                      "iri_template": "{id}",
+                      "schema_version": "1"
+                    }
+                  }]
+                }""");
+        final FederationSource entry = reg.byName("customers");
+        assertThat(entry.relationalConfig()).isPresent();
+        final FederationRegistry.RelationalConfig cfg = entry.relationalConfig().get();
+        assertThat(cfg.sinkKind()).isEqualTo("postgres");
+        assertThat(cfg.table()).isEqualTo("customers");
+        assertThat(cfg.subjectColumn()).isEqualTo("id");
+        assertThat(cfg.anchor().anchorClass()).hasValue("http://ex/Customer");
+        assertThat(cfg.emitProvenance()).isTrue();
+        assertThat(cfg.iriTemplate()).hasValue("{id}");
+        assertThat(cfg.schemaVersion()).hasValue("1");
+        assertThat(cfg.columnsByPredicate())
+                .containsEntry("http://ex/name", "name")
+                .containsEntry("http://ex/tier", "tier");
+    }
+
+    /**
+     * A `wf-relational` source with no `relational` block parses fine;
+     * {@link FederationRegistry.FederationSource#relationalConfig()} is
+     * empty. {@link WfRelationalRewrite} treats that as "leave the
+     * SERVICE alone" &mdash; same semantics the old sidecar registry
+     * provided when its per-name lookup missed.
+     */
+    @Test
+    public void wfRelationalWithoutConfigBlockIsEmpty() {
+        final FederationRegistry reg = parse("""
+                {
+                  "sources": [{
+                    "name": "orphan",
+                    "type": "wf-relational",
+                    "endpoint": "postgres://ex/db"
+                  }]
+                }""");
+        assertThat(reg.byName("orphan").relationalConfig()).isEmpty();
+    }
+
+    /**
+     * The `relational` block only meaningfully applies to
+     * `wf-relational` sources, but the parser doesn't reject it on other
+     * types &mdash; the block is captured on {@code relationalConfig}
+     * and the rewrite pass only consults it when the source type also
+     * matches. Silent capture keeps parsing forgiving; the rewrite
+     * pass's source-type check gates use.
+     */
+    @Test
+    public void relationalBlockCapturedRegardlessOfType() {
+        final FederationRegistry reg = parse("""
+                {
+                  "sources": [{
+                    "name": "hybrid",
+                    "type": "sparql",
+                    "endpoint": "http://ex/query",
+                    "relational": {
+                      "sink_kind": "postgres",
+                      "table": "t",
+                      "subject_column": "id",
+                      "columns": [
+                        {"name": "id", "role": "subject_iri", "type": "iri"}
+                      ]
+                    }
+                  }]
+                }""");
+        // Descriptor captured — but the WfRelationalRewrite pass refuses
+        // to fold because sourceType is SPARQL, not WF_RELATIONAL.
+        assertThat(reg.byName("hybrid").relationalConfig()).isPresent();
+    }
+
+    /**
+     * A malformed `relational` block (missing a required inner field)
+     * fails loudly at parse time, matching the base parser's fail-loud
+     * rules for required source fields.
+     */
+    @Test
+    public void relationalBlockMissingRequiredFieldRejected() {
+        assertThatThrownBy(() -> parse("""
+                {
+                  "sources": [{
+                    "name": "broken",
+                    "type": "wf-relational",
+                    "endpoint": "postgres://ex/db",
+                    "relational": {
+                      "table": "t",
+                      "subject_column": "id",
+                      "columns": []
+                    }
+                  }]
+                }"""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("relational.sink_kind")
+                .hasMessageContaining("broken");
+    }
+
+    /**
+     * Non-object {@code relational} value is a hard error (mirrors the
+     * treatment of {@code cardinality_hints} needing an object).
+     */
+    @Test
+    public void relationalBlockWrongShapeRejected() {
+        assertThatThrownBy(() -> parse("""
+                {
+                  "sources": [{
+                    "name": "broken",
+                    "type": "wf-relational",
+                    "endpoint": "postgres://ex/db",
+                    "relational": "oops"
+                  }]
+                }"""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("relational")
+                .hasMessageContaining("broken");
+    }
 }

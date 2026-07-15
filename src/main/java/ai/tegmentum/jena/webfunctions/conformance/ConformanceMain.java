@@ -11,7 +11,6 @@ import ai.tegmentum.jena.webfunctions.rewrite.InvokeRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.RewritePipeline;
 import ai.tegmentum.jena.webfunctions.rewrite.ShapeRegistry;
 import ai.tegmentum.jena.webfunctions.rewrite.WebFunctionQueryEngine;
-import ai.tegmentum.jena.webfunctions.rewrite.WfRelationalRegistry;
 
 import org.apache.jena.atlas.json.JSON;
 import org.apache.jena.atlas.json.JsonArray;
@@ -198,26 +197,12 @@ public final class ConformanceMain {
                     + " federation source(s) from " + federationCfg);
         }
 
-        // wf-relational sidecar registry (wf-relational memo §04). Reads
-        // the same federation-config file but only captures the
-        // per-source `relational` descriptor block that
-        // FederationRegistry deliberately drops. Empty registry is a
-        // valid state (either no config at all or no wf-relational
-        // sources in the config); WfRelationalRewrite short-circuits
-        // when empty.
-        final WfRelationalRegistry wfRelationalRegistry;
-        try {
-            wfRelationalRegistry = federationCfg == null
-                    ? WfRelationalRegistry.empty()
-                    : WfRelationalRegistry.loadFromJson(federationCfg);
-        } catch (Exception e) {
-            err.println("wf-relational config error: " + e.getMessage());
-            return 2;
-        }
-        if (federationCfg != null && !wfRelationalRegistry.isEmpty()) {
-            err.println("loaded " + wfRelationalRegistry.size()
-                    + " wf-relational source(s) from " + federationCfg);
-        }
+        // v0.3 unification note — `wf-relational` shape descriptors used
+        // to live in a sidecar `WfRelationalRegistry` that re-parsed the
+        // same federation-config JSON. That sidecar was folded into
+        // `FederationSource.relationalConfig`, so the `WfRelationalRewrite`
+        // pass now consumes descriptors straight off the federation
+        // registry entries. See `FederationRegistry` for the field.
 
         // The subsystem service file usually wires this up automatically,
         // but calling directly is idempotent and covers callers that
@@ -238,7 +223,7 @@ public final class ConformanceMain {
         final RewritePipeline.Context pipelineCtx = new RewritePipeline.Context(
                 invokeRegistry, conversionRegistry, aliasMap, shapeRegistry,
                 fulltextRegistry, documentRegistry, federationRegistry,
-                wfRelationalRegistry, wfFetchUrl);
+                wfFetchUrl);
         // Install on the ARQ global context; QueryExecution copies it into
         // the per-query context, so the engine factory's accept() sees
         // PIPELINE_SYMBOL and modifyOp writes ALIAS_STATE_SYMBOL back onto

@@ -1,10 +1,9 @@
 package ai.tegmentum.jena.webfunctions.rewrite;
 
+import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.Column;
 import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.FederationSource;
+import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.RelationalConfig;
 import ai.tegmentum.jena.webfunctions.rewrite.FederationRegistry.SourceType;
-import ai.tegmentum.jena.webfunctions.rewrite.WfRelationalRegistry.Column;
-import ai.tegmentum.jena.webfunctions.rewrite.WfRelationalRegistry.RelationalDescriptor;
-import ai.tegmentum.jena.webfunctions.rewrite.WfRelationalRegistry.RelationalEntry;
 
 import org.apache.jena.atlas.json.JsonArray;
 import org.apache.jena.atlas.json.JsonObject;
@@ -83,9 +82,18 @@ import java.util.Map;
  * <h3>Position in the pipeline</h3>
  * Same slot as {@link WfFetchRewrite}: after {@link WfFederationRewrite}
  * (which emits the {@code wf-relational:} URLs this pass consumes) and
- * before {@link ShapeRewrite}. Empty registry or empty wfFetchUrl
- * &rarr; short-circuit; unknown name &rarr; leave the SERVICE alone;
- * wrong source type &rarr; leave alone.
+ * before {@link ShapeRewrite}. Empty federation registry or empty
+ * wfFetchUrl &rarr; short-circuit; unknown name &rarr; leave the
+ * SERVICE alone; wrong source type &rarr; leave alone; source missing
+ * a {@code relational} block &rarr; leave alone.
+ *
+ * <h3>v0.3 unification</h3>
+ * Prior to v0.3 the shape descriptor lived in a sidecar
+ * {@code WfRelationalRegistry} that re-parsed the same JSON file
+ * {@link FederationRegistry} consumed. v0.3 folds the descriptor into
+ * {@link FederationSource#relationalConfig()}, and this pass reads it
+ * from there &mdash; one lookup path, one source of truth. See
+ * {@link FederationRegistry} for the field.
  *
  * <p>Java sibling of {@code oxigraph-wf/src/wf_relational_rewrite.rs}.
  */
@@ -106,18 +114,17 @@ public final class WfRelationalRewrite {
     /**
      * @return rewritten Op &mdash; a copy with qualifying
      *     {@code SERVICE <wf-relational:...>} clauses replaced by
-     *     {@code SERVICE <wf:call>} envelopes; identity when either
-     *     registry is empty or the fetch URL is null.
+     *     {@code SERVICE <wf:call>} envelopes; identity when the
+     *     federation registry is empty or the fetch URL is null.
      */
     public static Op rewrite(final Op op,
                              final FederationRegistry federationRegistry,
-                             final WfRelationalRegistry relationalRegistry,
                              final String wfFetchUrl) {
         if (op == null) return null;
-        if (relationalRegistry == null || relationalRegistry.isEmpty()) return op;
+        if (federationRegistry == null || federationRegistry.isEmpty()) return op;
         if (wfFetchUrl == null || wfFetchUrl.isEmpty()) return op;
         return Transformer.transform(
-                new RelationalTransform(federationRegistry, relationalRegistry, wfFetchUrl), op);
+                new RelationalTransform(federationRegistry, wfFetchUrl), op);
     }
 
     // ---------------------------------------------------------------------
@@ -126,14 +133,11 @@ public final class WfRelationalRewrite {
 
     private static final class RelationalTransform extends TransformCopy {
         private final FederationRegistry federationRegistry;
-        private final WfRelationalRegistry relationalRegistry;
         private final String wfFetchUrl;
 
         RelationalTransform(final FederationRegistry federationRegistry,
-                            final WfRelationalRegistry relationalRegistry,
                             final String wfFetchUrl) {
             this.federationRegistry = federationRegistry;
-            this.relationalRegistry = relationalRegistry;
             this.wfFetchUrl = wfFetchUrl;
         }
 
@@ -151,20 +155,23 @@ public final class WfRelationalRewrite {
             if (name.isEmpty()) {
                 return super.transform(opService, subOp);
             }
-            // Defensive federation-registry check: if the federation
-            // registry has this name at all, it must be a WF_RELATIONAL
-            // source. Absent from the registry is still allowed &mdash;
-            // users may reach this pass via an explicit SERVICE clause.
-            if (federationRegistry != null) {
-                final FederationSource fs = federationRegistry.byName(name);
-                if (fs != null && fs.sourceType() != SourceType.WF_RELATIONAL) {
-                    return super.transform(opService, subOp);
-                }
-            }
-            final RelationalEntry entry = relationalRegistry.byName(name);
+            final FederationSource entry = federationRegistry.byName(name);
             if (entry == null) {
+                // Unknown source name — leave the SERVICE alone.
                 return super.transform(opService, subOp);
             }
+            if (entry.sourceType() != SourceType.WF_RELATIONAL) {
+                // Wrong source type — refuse to fold even if a
+                // `relational` block is (mis)configured on it.
+                return super.transform(opService, subOp);
+            }
+            if (entry.relationalConfig().isEmpty()) {
+                // wf-relational source with no descriptor block — same
+                // "descriptor missing, skip" semantics the old sidecar
+                // registry provided when its per-name lookup missed.
+                return super.transform(opService, subOp);
+            }
+            final RelationalConfig cfg = entry.relationalConfig().get();
 
             // Extract BGP triples from the SERVICE body.
             final BasicPattern bgp = collectBgp(subOp);
@@ -176,8 +183,7 @@ public final class WfRelationalRewrite {
                 return super.transform(opService, subOp);
             }
 
-            final Map<String, String> byPred =
-                    entry.descriptor().columnsByPredicate();
+            final Map<String, String> byPred = cfg.columnsByPredicate();
             final List<Map.Entry<String, Var>> columns =
                     new ArrayList<>(bgp.size());
             for (Triple t : bgp) {
@@ -186,8 +192,8 @@ public final class WfRelationalRewrite {
                     return super.transform(opService, subOp);
                 }
                 final String predIri = p.getURI();
-                // rdf:type triples are structural &mdash; the anchor
-                // class is baked into the descriptor already. Skip.
+                // rdf:type triples are structural — the anchor class is
+                // baked into the descriptor already. Skip.
                 if (RDF_TYPE.equals(predIri)) {
                     continue;
                 }
@@ -205,7 +211,7 @@ public final class WfRelationalRewrite {
             if (columns.isEmpty()) {
                 return super.transform(opService, subOp);
             }
-            return buildWfCallService(subjectVar, entry, columns);
+            return buildWfCallService(subjectVar, entry, cfg, columns);
         }
 
         /**
@@ -247,12 +253,13 @@ public final class WfRelationalRewrite {
          * descriptor JSON baked into the {@code wf:arg} literal.
          */
         private Op buildWfCallService(final Var subjectVar,
-                                      final RelationalEntry entry,
+                                      final FederationSource entry,
+                                      final RelationalConfig cfg,
                                       final List<Map.Entry<String, Var>> columns) {
             final Node cnode = NodeFactory.createBlankNode();
             final Node onode = NodeFactory.createBlankNode();
 
-            final String descriptorJson = buildDescriptorJson(entry);
+            final String descriptorJson = buildDescriptorJson(entry, cfg);
 
             final BasicPattern bp = new BasicPattern();
             // Config side (cnode): the wasm URL and descriptor JSON literal.
@@ -265,7 +272,7 @@ public final class WfRelationalRewrite {
 
             // Output side (onode).
             bp.add(Triple.create(onode,
-                    NodeFactory.createURI(WF_NS + entry.descriptor().subjectColumn()),
+                    NodeFactory.createURI(WF_NS + cfg.subjectColumn()),
                     subjectVar));
             for (Map.Entry<String, Var> col : columns) {
                 bp.add(Triple.create(onode,
@@ -293,17 +300,17 @@ public final class WfRelationalRewrite {
      * <p>Package-private for the WfRelationalRewriteTest fixture &mdash;
      * saves the tests from having to inline the same JSON shape.
      */
-    static String buildDescriptorJson(final RelationalEntry entry) {
-        final RelationalDescriptor d = entry.descriptor();
+    static String buildDescriptorJson(final FederationSource entry,
+                                      final RelationalConfig cfg) {
         // `sink` = "<endpoint>#<table>" mirrors the sqlite sink URL format
         // (`sqlite:///path/to.db#tablename`). The Postgres sink
         // implementation strips the fragment when connecting; the fragment
         // stays as human-readable metadata + a way for callers to see
         // which table the guest will query.
-        final String sinkUrl = entry.endpoint() + "#" + d.table();
+        final String sinkUrl = entry.endpoint() + "#" + cfg.table();
 
         final JsonArray columnsJson = new JsonArray();
-        for (Column c : d.columns()) {
+        for (Column c : cfg.columns()) {
             final JsonObject obj = new JsonObject();
             obj.put("name", c.name());
             obj.put("role", c.role());
@@ -317,21 +324,21 @@ public final class WfRelationalRewrite {
         }
 
         final JsonObject anchorJson = new JsonObject();
-        d.anchorClass().ifPresent(cls -> anchorJson.put("class", cls));
+        cfg.anchor().anchorClass().ifPresent(cls -> anchorJson.put("class", cls));
 
         final JsonObject root = new JsonObject();
         root.put("name", entry.name());
         root.put("shape", entry.name());
         root.put("sink", sinkUrl);
-        root.put("sink_kind", d.sinkKind());
+        root.put("sink_kind", cfg.sinkKind());
         root.put("include_graph", false);
-        root.put("table", d.table());
-        root.put("subject_column", d.subjectColumn());
+        root.put("table", cfg.table());
+        root.put("subject_column", cfg.subjectColumn());
         root.put("anchor", anchorJson);
         root.put("columns", columnsJson);
-        root.put("emit_provenance", d.emitProvenance());
-        d.iriTemplate().ifPresent(t -> root.put("iri_template", t));
-        d.schemaVersion().ifPresent(v -> root.put("schema_version", v));
+        root.put("emit_provenance", cfg.emitProvenance());
+        cfg.iriTemplate().ifPresent(t -> root.put("iri_template", t));
+        cfg.schemaVersion().ifPresent(v -> root.put("schema_version", v));
         return root.toString();
     }
 }

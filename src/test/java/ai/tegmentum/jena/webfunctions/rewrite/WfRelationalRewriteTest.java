@@ -26,6 +26,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Unit tests for {@link WfRelationalRewrite}. Sibling of
  * {@code oxigraph-wf/src/wf_relational_rewrite.rs::tests}.
+ *
+ * <p>v0.3 &mdash; the sidecar {@code WfRelationalRegistry} was folded
+ * into {@link FederationSource#relationalConfig()}; these tests drive
+ * the pass with a single {@link FederationRegistry} carrying the
+ * {@code relational} descriptor blocks.
  */
 public class WfRelationalRewriteTest {
 
@@ -68,21 +73,45 @@ public class WfRelationalRewriteTest {
                 }""";
     }
 
-    private static WfRelationalRegistry customersRegistry() {
-        final JsonObject root = JSON.parse(customersRelationalJson());
-        return WfRelationalRegistry.fromJson(root);
-    }
-
     private static FederationRegistry customersFederation() {
         final JsonObject root = JSON.parse(customersRelationalJson());
         return FederationRegistry.fromJson(root);
     }
 
-    /** Federation registry that types `customers` as SPARQL instead of WF_RELATIONAL. */
+    /**
+     * Federation registry where `customers` is typed SPARQL rather than
+     * WF_RELATIONAL. Ships a {@code relational} block anyway to exercise
+     * the rewrite pass's source-type gate.
+     */
     private static FederationRegistry wrongTypeFederation() {
-        return FederationRegistry.of(List.of(
-                new FederationSource("customers", SourceType.SPARQL,
-                        "http://ex/query", List.of(), OptionalInt.empty())));
+        return FederationRegistry.fromJson(JSON.parse("""
+                {
+                  "sources": [{
+                    "name": "customers",
+                    "type": "sparql",
+                    "endpoint": "http://ex/query",
+                    "relational": {
+                      "sink_kind": "postgres",
+                      "table": "customers",
+                      "subject_column": "id",
+                      "columns": [
+                        {"name": "id", "role": "subject_iri", "type": "iri"}
+                      ]
+                    }
+                  }]
+                }"""));
+    }
+
+    /** wf-relational source with no `relational` block &mdash; missing descriptor. */
+    private static FederationRegistry customersWithoutRelationalBlock() {
+        return FederationRegistry.fromJson(JSON.parse("""
+                {
+                  "sources": [{
+                    "name": "customers",
+                    "type": "wf-relational",
+                    "endpoint": "postgres://user@localhost/mydb"
+                  }]
+                }"""));
     }
 
     // ---------------------------------------------------------------------
@@ -147,7 +176,7 @@ public class WfRelationalRewriteTest {
     public void foldsWfRelationalServiceBodyIntoWfCallEnvelope() {
         final Op input = serviceOverCustomers("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), customersRegistry(), WF_FETCH_URL);
+                customersFederation(), WF_FETCH_URL);
 
         final List<OpService> services = collectServices(out);
         assertThat(services).hasSize(1);
@@ -158,7 +187,7 @@ public class WfRelationalRewriteTest {
     public void foldBakesPostgresSinkKindAndUrlInDescriptor() {
         final Op input = serviceOverCustomersSingle("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), customersRegistry(), WF_FETCH_URL);
+                customersFederation(), WF_FETCH_URL);
 
         final JsonObject d = JSON.parse(descriptorArgJson(out));
         assertThat(d.get("sink_kind").getAsString().value()).isEqualTo("postgres");
@@ -179,20 +208,41 @@ public class WfRelationalRewriteTest {
     public void foldCarriesShapeVersionProvenanceThrough() {
         final Op input = serviceOverCustomersSingle("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), customersRegistry(), WF_FETCH_URL);
+                customersFederation(), WF_FETCH_URL);
 
         final JsonObject d = JSON.parse(descriptorArgJson(out));
         assertThat(d.get("emit_provenance").getAsBoolean().value()).isTrue();
         assertThat(d.get("schema_version").getAsString().value()).isEqualTo("1");
     }
 
+    /** Empty federation registry short-circuits — nothing to fold. */
     @Test
-    public void emptyRelationalRegistryShortCircuits() {
+    public void emptyRegistryShortCircuits() {
         final Op input = serviceOverCustomersSingle("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), WfRelationalRegistry.empty(), WF_FETCH_URL);
+                FederationRegistry.empty(), WF_FETCH_URL);
 
         assertThat(out).isSameAs(input);
+        final List<OpService> services = collectServices(out);
+        assertThat(services).hasSize(1);
+        assertThat(services.get(0).getService().getURI())
+                .isEqualTo("wf-relational:customers");
+    }
+
+    /**
+     * v0.3 unification &mdash; a {@code wf-relational} source registered
+     * with no {@code relational} block means
+     * {@link FederationSource#relationalConfig()} is
+     * {@link java.util.Optional#empty()}, and the rewrite pass leaves
+     * the SERVICE alone. Matches the old sidecar's
+     * "descriptor-missing &rarr; skip" behavior.
+     */
+    @Test
+    public void wfRelationalWithoutConfigLeftAlone() {
+        final Op input = serviceOverCustomersSingle("wf-relational:customers");
+        final Op out = WfRelationalRewrite.rewrite(input,
+                customersWithoutRelationalBlock(), WF_FETCH_URL);
+
         final List<OpService> services = collectServices(out);
         assertThat(services).hasSize(1);
         assertThat(services.get(0).getService().getURI())
@@ -203,7 +253,7 @@ public class WfRelationalRewriteTest {
     public void emptyWfFetchUrlShortCircuits() {
         final Op input = serviceOverCustomersSingle("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), customersRegistry(), "");
+                customersFederation(), "");
 
         assertThat(out).isSameAs(input);
     }
@@ -212,7 +262,7 @@ public class WfRelationalRewriteTest {
     public void nullWfFetchUrlShortCircuits() {
         final Op input = serviceOverCustomersSingle("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), customersRegistry(), null);
+                customersFederation(), null);
 
         assertThat(out).isSameAs(input);
     }
@@ -221,7 +271,7 @@ public class WfRelationalRewriteTest {
     public void unknownSourceNameLeftAlone() {
         final Op input = serviceOverCustomersSingle("wf-relational:unknown");
         final Op out = WfRelationalRewrite.rewrite(input,
-                FederationRegistry.empty(), customersRegistry(), WF_FETCH_URL);
+                customersFederation(), WF_FETCH_URL);
 
         final List<OpService> services = collectServices(out);
         assertThat(services).hasSize(1);
@@ -231,14 +281,14 @@ public class WfRelationalRewriteTest {
 
     /**
      * Federation registry has {@code customers} typed {@code sparql} &mdash;
-     * the defensive check refuses to fold. Synthetic configuration; real
-     * deployments always align the type + the relational block.
+     * the source-type check refuses to fold even though a
+     * {@code relational} block is present (synthetic misconfiguration).
      */
     @Test
     public void wrongSourceTypeLeftAlone() {
         final Op input = serviceOverCustomersSingle("wf-relational:customers");
         final Op out = WfRelationalRewrite.rewrite(input,
-                wrongTypeFederation(), customersRegistry(), WF_FETCH_URL);
+                wrongTypeFederation(), WF_FETCH_URL);
 
         final List<OpService> services = collectServices(out);
         assertThat(services).hasSize(1);
@@ -251,11 +301,26 @@ public class WfRelationalRewriteTest {
         // SERVICE <http://example/query> ... — not wf-relational: at all.
         final Op input = serviceOverCustomersSingle("http://example.com/query");
         final Op out = WfRelationalRewrite.rewrite(input,
-                customersFederation(), customersRegistry(), WF_FETCH_URL);
+                customersFederation(), WF_FETCH_URL);
 
         final List<OpService> services = collectServices(out);
         assertThat(services).hasSize(1);
         assertThat(services.get(0).getService().getURI())
                 .isEqualTo("http://example.com/query");
+    }
+
+    /**
+     * Constructing a FederationSource programmatically via the legacy
+     * five-arg constructor should leave {@code relationalConfig} empty,
+     * matching what a JSON entry without the {@code relational} block
+     * produces. Guards against a delegation regression in the legacy
+     * constructor overloads.
+     */
+    @Test
+    public void programmaticFederationSourceRelationalConfigDefaultsEmpty() {
+        final FederationSource s = new FederationSource(
+                "customers", SourceType.WF_RELATIONAL,
+                "postgres://user@localhost/mydb", List.of(), OptionalInt.empty());
+        assertThat(s.relationalConfig()).isEmpty();
     }
 }
