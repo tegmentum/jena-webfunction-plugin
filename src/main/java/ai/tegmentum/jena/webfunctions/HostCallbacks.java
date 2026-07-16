@@ -449,7 +449,7 @@ public final class HostCallbacks {
     }
 
     /**
-     * {@code wf:sagegraph/host@0.1.0#execute-query:
+     * {@code wf:sagegraph/host@0.2.0#execute-query:
      *  func(sparql: string) -> result<string, string>}.
      *
      * <p>The wf_sagegraph guest imports this to issue k-hop neighborhood
