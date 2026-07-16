@@ -162,14 +162,38 @@ public final class WfSageGraphRewrite {
         final String model;
         /** null when {@code ?pool=} isn't set. */
         final String pool;
+        /**
+         * wave-15 (wf-sagegraph memo §06): null when {@code ?features=}
+         * isn't set. When set to {@code "text"} the guest routes through
+         * {@code wf:embed/host@0.1.0::embed-text} instead of the
+         * structural + ONNX default.
+         */
+        final String features;
+        /**
+         * wave-15: null when neither {@code ?text-model=} nor
+         * {@code ?text_model=} is set. Sentence-embedding model name
+         * for text-mode.
+         */
+        final String textModel;
+        /**
+         * wave-15: null when neither {@code ?text-predicate=} nor
+         * {@code ?text_predicate=} is set. Predicate IRI to source
+         * the text signal from.
+         */
+        final String textPredicate;
 
         ParsedUrl(final String name, final String nodeIri, final Integer k,
-                  final String model, final String pool) {
+                  final String model, final String pool,
+                  final String features, final String textModel,
+                  final String textPredicate) {
             this.name = name;
             this.nodeIri = nodeIri;
             this.k = k;
             this.model = model;
             this.pool = pool;
+            this.features = features;
+            this.textModel = textModel;
+            this.textPredicate = textPredicate;
         }
     }
 
@@ -216,7 +240,17 @@ public final class WfSageGraphRewrite {
                 // Malformed — treat as absent, dispatch will use the default.
             }
         }
-        return new ParsedUrl(name, nodeIri, k, opts.get("model"), opts.get("pool"));
+        // wave-15 text-mode opts. Accept both kebab-case (WIT-native
+        // shape the guest deserializes) and snake-case for URL-shape
+        // parity with engines that emit either convention. Kebab wins
+        // when both present.
+        final String features = opts.get("features");
+        String textModel = opts.get("text-model");
+        if (textModel == null) textModel = opts.get("text_model");
+        String textPredicate = opts.get("text-predicate");
+        if (textPredicate == null) textPredicate = opts.get("text_predicate");
+        return new ParsedUrl(name, nodeIri, k, opts.get("model"), opts.get("pool"),
+                features, textModel, textPredicate);
     }
 
     private static String urlDecode(final String s) {
@@ -317,8 +351,25 @@ public final class WfSageGraphRewrite {
         final int k = parsed.k == null ? DEFAULT_K_HOPS : parsed.k;
         final String model = parsed.model == null ? DEFAULT_MODEL_URL : parsed.model;
         final String pool = parsed.pool == null ? DEFAULT_POOL : parsed.pool;
-        final String optsJson = "{\"dimensions\":" + DEFAULT_DIMENSIONS
-                + ",\"pool\":\"" + jsonEscape(pool) + "\"}";
+        // Build opts JSON with `text-*` fields (kebab-case, matching
+        // the WIT `embed-opts` record) only when the URL sugar supplied
+        // them so the wire shape stays byte-stable for the structural
+        // default path.
+        final StringBuilder opts = new StringBuilder();
+        opts.append("{\"dimensions\":").append(DEFAULT_DIMENSIONS);
+        opts.append(",\"pool\":\"").append(jsonEscape(pool)).append("\"");
+        if (parsed.features != null) {
+            opts.append(",\"features\":\"").append(jsonEscape(parsed.features)).append("\"");
+        }
+        if (parsed.textModel != null) {
+            opts.append(",\"text-model\":\"").append(jsonEscape(parsed.textModel)).append("\"");
+        }
+        if (parsed.textPredicate != null) {
+            opts.append(",\"text-predicate\":\"")
+                    .append(jsonEscape(parsed.textPredicate)).append("\"");
+        }
+        opts.append("}");
+        final String optsJson = opts.toString();
         final List<Node> args = new ArrayList<>(4);
         args.add(NodeFactory.createLiteralString(parsed.nodeIri));
         args.add(NodeFactory.createLiteralString(model));

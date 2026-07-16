@@ -37,6 +37,55 @@ public class WfSageGraphRewriteTest {
         assertThat(p.k).isEqualTo(2);
         assertThat(p.model).isNull();
         assertThat(p.pool).isNull();
+        // Wave-15 text-mode opts: absent unless the URL sugar sets them.
+        assertThat(p.features).isNull();
+        assertThat(p.textModel).isNull();
+        assertThat(p.textPredicate).isNull();
+    }
+
+    // --- Wave-15 URL parser tests (text-mode opts, memo §06) ------------
+
+    @Test
+    public void parsesFeaturesTextOpt() {
+        final WfSageGraphRewrite.ParsedUrl p = WfSageGraphRewrite.parseUrl(
+                "wf-sagegraph:people-text?node=http%3A%2F%2Fex%2Falice&features=text");
+        assertThat(p).isNotNull();
+        assertThat(p.features).isEqualTo("text");
+        assertThat(p.textModel).isNull();
+        assertThat(p.textPredicate).isNull();
+    }
+
+    @Test
+    public void parsesTextModelKebabAndSnake() {
+        // Kebab-case matches the guest's WIT record field name;
+        // snake_case is the URL-param convention some engines emit.
+        // Both must be accepted.
+        final WfSageGraphRewrite.ParsedUrl kebab = WfSageGraphRewrite.parseUrl(
+                "wf-sagegraph:people-text?node=http%3A%2F%2Fex%2Fa"
+                        + "&features=text&text-model=all-MiniLM-L6-v2");
+        assertThat(kebab).isNotNull();
+        assertThat(kebab.textModel).isEqualTo("all-MiniLM-L6-v2");
+
+        final WfSageGraphRewrite.ParsedUrl snake = WfSageGraphRewrite.parseUrl(
+                "wf-sagegraph:people-text?node=http%3A%2F%2Fex%2Fa"
+                        + "&features=text&text_model=all-MiniLM-L6-v2");
+        assertThat(snake).isNotNull();
+        assertThat(snake.textModel).isEqualTo("all-MiniLM-L6-v2");
+    }
+
+    @Test
+    public void parsesTextPredicateKebabAndSnakeUrldecoded() {
+        final WfSageGraphRewrite.ParsedUrl kebab = WfSageGraphRewrite.parseUrl(
+                "wf-sagegraph:people-text?node=http%3A%2F%2Fex%2Fa"
+                        + "&features=text&text-predicate=http%3A%2F%2Fexample.com%2Fname");
+        assertThat(kebab).isNotNull();
+        assertThat(kebab.textPredicate).isEqualTo("http://example.com/name");
+
+        final WfSageGraphRewrite.ParsedUrl snake = WfSageGraphRewrite.parseUrl(
+                "wf-sagegraph:people-text?node=http%3A%2F%2Fex%2Fa"
+                        + "&features=text&text_predicate=http%3A%2F%2Fexample.com%2Fname");
+        assertThat(snake).isNotNull();
+        assertThat(snake.textPredicate).isEqualTo("http://example.com/name");
     }
 
     @Test
@@ -226,6 +275,70 @@ public class WfSageGraphRewriteTest {
         final Op out = WfSageGraphRewrite.rewrite(in, invokes, WASM_URL);
         assertThat(invokes.size()).isEqualTo(0);
         assertThat(firstWfSagegraphService(out)).isPresent();
+    }
+
+    // --- Wave-15 rewrite tests (text-mode opts flow to opts_json) -------
+
+    @Test
+    public void featuresTextLandsInOptsJson() {
+        final InvokeRegistry invokes = new InvokeRegistry();
+        final String sparql = ""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?embedding WHERE {\n"
+                + "  SERVICE <wf-sagegraph:people?node=http%3A%2F%2Fex%2Fa&k=1&features=text> {\n"
+                + "    ?_ wf:embedding ?embedding\n"
+                + "  }\n"
+                + "}";
+        WfSageGraphRewrite.rewrite(algebraOf(sparql), invokes, WASM_URL);
+        assertThat(invokes.size()).isEqualTo(1);
+        final String opts = invokes.get(0L).orElseThrow()
+                .args.get(3).getLiteralLexicalForm();
+        assertThat(opts).contains("\"features\":\"text\"");
+        assertThat(opts).doesNotContain("\"text-model\"");
+        assertThat(opts).doesNotContain("\"text-predicate\"");
+    }
+
+    @Test
+    public void textModelSnakeCaseKebabizedInOptsJson() {
+        final InvokeRegistry invokes = new InvokeRegistry();
+        // URL carries snake-case `text_model=` — opts_json must emit
+        // kebab-case `text-model` to match the guest's WIT record.
+        final String sparql = ""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?embedding WHERE {\n"
+                + "  SERVICE <wf-sagegraph:people?node=http%3A%2F%2Fex%2Fa"
+                + "&k=1&features=text&text_model=all-MiniLM-L6-v2> {\n"
+                + "    ?_ wf:embedding ?embedding\n"
+                + "  }\n"
+                + "}";
+        WfSageGraphRewrite.rewrite(algebraOf(sparql), invokes, WASM_URL);
+        assertThat(invokes.size()).isEqualTo(1);
+        final String opts = invokes.get(0L).orElseThrow()
+                .args.get(3).getLiteralLexicalForm();
+        assertThat(opts).contains("\"features\":\"text\"");
+        assertThat(opts).contains("\"text-model\":\"all-MiniLM-L6-v2\"");
+    }
+
+    @Test
+    public void absencePreservedWhenUrlOmitsTextOpts() {
+        // Structural (default) mode — no text opts on the URL, so the
+        // opts_json wire shape stays byte-stable for the pinned
+        // `sagegraph_degree_features` case.
+        final InvokeRegistry invokes = new InvokeRegistry();
+        final String sparql = ""
+                + "PREFIX wf: <http://tegmentum.ai/ns/webfunction/>\n"
+                + "SELECT ?embedding WHERE {\n"
+                + "  SERVICE <wf-sagegraph:people?node=http%3A%2F%2Fex%2Fa&k=1> {\n"
+                + "    ?_ wf:embedding ?embedding\n"
+                + "  }\n"
+                + "}";
+        WfSageGraphRewrite.rewrite(algebraOf(sparql), invokes, WASM_URL);
+        assertThat(invokes.size()).isEqualTo(1);
+        final String opts = invokes.get(0L).orElseThrow()
+                .args.get(3).getLiteralLexicalForm();
+        assertThat(opts).doesNotContain("\"features\"");
+        assertThat(opts).doesNotContain("\"text-model\"");
+        assertThat(opts).doesNotContain("\"text-predicate\"");
     }
 
     @Test
