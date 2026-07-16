@@ -70,7 +70,7 @@ import java.util.Map;
  *   [--alias-config alias.json] [--shape-config shape.json] \
  *   [--conversion-config conversion.json] [--partial-config partial.json] \
  *   [--fulltext-config fulltext.json] [--document-config document.json] \
- *   [--federation-config federation.json]
+ *   [--federation-config federation.json] [--sagegraph-config sagegraph.json]
  * }</pre>
  *
  * <p>Exit code 0 on success; non-zero with an error line on stderr on
@@ -145,6 +145,7 @@ public final class ConformanceMain {
         final Path fulltextCfg = optionalPathArg(parsed, "--fulltext-config");
         final Path documentCfg = optionalPathArg(parsed, "--document-config");
         final Path federationCfg = optionalPathArg(parsed, "--federation-config");
+        final Path sagegraphCfg = optionalPathArg(parsed, "--sagegraph-config");
 
         // Fulltext registry is loaded independently of the rewrite
         // pipeline: it stores config only, and the filter-fold rewrite
@@ -225,6 +226,27 @@ public final class ConformanceMain {
         // `FederationSource.relationalConfig`, so the `WfRelationalRewrite`
         // pass now consumes descriptors straight off the federation
         // registry entries. See `FederationRegistry` for the field.
+
+        // Sagegraph registry (wf_sagegraph v0.1). Load-and-report shape
+        // matches the fulltext / document / federation registries. v0.1
+        // ships adapter-plumbing only — the parallel host-callback +
+        // wf_sagegraph guest agents deliver the actual embedder — so
+        // the JSON is validated and logged here but not yet routed into
+        // a rewrite pass. When `wf:sagegraph/host@0.1.0` lands on
+        // FederationRegistry it can consume the same registry-count
+        // trace on stderr to confirm the config reached the JVM. See
+        // wf-sagegraph memo §04 for the JSON shape.
+        final int sagegraphCount;
+        try {
+            sagegraphCount = countSagegraphIndexes(sagegraphCfg);
+        } catch (Exception e) {
+            err.println("sagegraph config error: " + e.getMessage());
+            return 2;
+        }
+        if (sagegraphCfg != null) {
+            err.println("loaded " + sagegraphCount
+                    + " sagegraph index(es) from " + sagegraphCfg);
+        }
 
         // The subsystem service file usually wires this up automatically,
         // but calling directly is idempotent and covers callers that
@@ -453,6 +475,49 @@ public final class ConformanceMain {
         final JsonObject obj = JSON.parse(Files.readString(p));
         if (!obj.hasKey("wf_fetch_url")) return null;
         return obj.get("wf_fetch_url").getAsString().value();
+    }
+
+    /**
+     * Parse {@code --sagegraph-config} and return the number of registered
+     * indexes. Absent path returns 0. Populates zero downstream state
+     * today &mdash; the parallel host-callback + wf_sagegraph guest agents
+     * deliver the pass that consumes it &mdash; but validates the JSON
+     * shape (`{"indexes":[{name,dimensions,default_k_hops?}]}` from
+     * wf-sagegraph memo &sect;04) so a malformed config fails loudly at
+     * boot rather than at unresolved-SERVICE dispatch.
+     */
+    private static int countSagegraphIndexes(final Path p) throws Exception {
+        if (p == null) return 0;
+        final JsonObject root = JSON.parse(Files.readString(p));
+        if (!root.hasKey("indexes")) return 0;
+        final JsonArray indexes = root.get("indexes").getAsArray();
+        int n = 0;
+        for (JsonValue v : indexes) {
+            if (!v.isObject()) {
+                throw new IllegalArgumentException(
+                        "sagegraph registry entry #" + n + " is not a JSON object");
+            }
+            final JsonObject e = v.getAsObject();
+            if (!e.hasKey("name") || !e.get("name").isString()) {
+                throw new IllegalArgumentException(
+                        "sagegraph registry entry #" + n + ": missing `name`");
+            }
+            if (!e.hasKey("dimensions") || !e.get("dimensions").isNumber()) {
+                throw new IllegalArgumentException(
+                        "sagegraph registry entry `"
+                                + e.get("name").getAsString().value()
+                                + "`: missing or non-numeric `dimensions`");
+            }
+            final long dims = e.get("dimensions").getAsNumber().value().longValue();
+            if (dims < 3) {
+                throw new IllegalArgumentException(
+                        "sagegraph registry entry `"
+                                + e.get("name").getAsString().value()
+                                + "`: dimensions must be >= 3 (memo §04); got " + dims);
+            }
+            n++;
+        }
+        return n;
     }
 
     /**
