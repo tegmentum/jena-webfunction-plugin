@@ -45,7 +45,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jena.version>6.1.0</jena.version>
         <webassembly4j.version>2.1.0</webassembly4j.version>
-        <wasmtime4j.version>46.0.1-1.3.0</wasmtime4j.version>
+        <wasmtime4j.version>46.0.1-1.4.0</wasmtime4j.version>
         <junit.version>4.13.2</junit.version>
         <assertj.version>3.24.2</assertj.version>
         <testcontainers.version>2.0.5</testcontainers.version>
