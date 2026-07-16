@@ -191,8 +191,26 @@ public final class WitValueMarshaller {
      * rules.
      */
     public static List<Row> bindingSetsFromWit(final WitValue witValue) {
+        return bindingSetsFromWit(witValue, null);
+    }
+
+    /**
+     * Full-fidelity overload that also threads an optional
+     * {@code inputNodeIri} decode-time context. The decoder uses this
+     * only when the guest returns a bare {@code list<float32>} — the
+     * wf_sagegraph {@code embed} shape — to bind {@code ?node}
+     * alongside the emitted {@code ?embedding} in the same row. Every
+     * other return shape ignores the hint and behaves identically to
+     * {@link #bindingSetsFromWit(WitValue)}.
+     */
+    public static List<Row> bindingSetsFromWit(final WitValue witValue, final String inputNodeIri) {
         if (witValue instanceof WitList) {
-            return hitListToRows((WitList) witValue);
+            final WitList list = (WitList) witValue;
+            final List<WitValue> elems = list.getElements();
+            if (!elems.isEmpty() && elems.get(0) instanceof WitFloat32) {
+                return floatListToRows(elems, inputNodeIri);
+            }
+            return hitListToRows(list);
         }
         final WitRecord record = (WitRecord) witValue;
         final List<String> vars = new ArrayList<>();
@@ -315,6 +333,77 @@ public final class WitValueMarshaller {
             rows.add(new Row(vars, byIndex));
         }
         return rows;
+    }
+
+    /**
+     * Decode a bare {@code list<float32>} guest return into Rows. This
+     * is the wf_sagegraph {@code embed} return shape (memo §04): a
+     * raw embedding vector, one f32 per dimension.
+     *
+     * <p>Projects a single-row binding-sets:
+     * <ul>
+     *   <li>vars: {@code ["node", "embedding"]} when {@code inputNodeIri}
+     *       is URI-shaped; otherwise just {@code ["embedding"]} (the
+     *       caller's outer BGP is expected to re-bind {@code ?node}).</li>
+     *   <li>{@code ?embedding} — xsd:string literal holding the JSON-
+     *       array serialization of the vector. Integer-valued
+     *       components print without a trailing {@code .0}
+     *       ({@code 4} not {@code 4.0}) to match the wire shape the
+     *       Rust engines produce.</li>
+     *   <li>{@code ?node} — URI node with the {@code inputNodeIri}
+     *       when the hint is URI-shaped.</li>
+     * </ul>
+     * Mirrors {@code oxigraph-wf/src/wf_call.rs::decode_embedding_vector}
+     * and {@code qlever-wf-runtime/src/lib.rs::embedding_vector_to_binding_sets}.
+     */
+    private static List<Row> floatListToRows(
+            final List<WitValue> items, final String inputNodeIri) {
+        final float[] floats = new float[items.size()];
+        for (int i = 0; i < items.size(); i++) {
+            final WitValue v = items.get(i);
+            if (!(v instanceof WitFloat32)) {
+                throw new IllegalArgumentException(
+                        "embedding element not a float32: " + v);
+            }
+            floats[i] = ((WitFloat32) v).getValue();
+        }
+        final String json = embeddingVectorToJson(floats);
+        final Node embeddingNode = NodeFactory.createLiteralDT(json, XSDDatatype.XSDstring);
+
+        final boolean includeNode = inputNodeIri != null && isUriShaped(inputNodeIri);
+        final List<String> vars = new ArrayList<>(2);
+        final List<Node> values = new ArrayList<>(2);
+        if (includeNode) {
+            vars.add("node");
+            values.add(NodeFactory.createURI(inputNodeIri));
+        }
+        vars.add("embedding");
+        values.add(embeddingNode);
+        return java.util.Collections.singletonList(new Row(vars, values));
+    }
+
+    /**
+     * Serialize an embedding vector as a JSON list literal. Byte-parity
+     * target: {@code oxigraph-wf::wf_call::embedding_vector_to_json}
+     * and {@code oxigraph-wf::wf_sagegraph_rewrite::embedding_to_json_string}.
+     * Integer-valued components print as an integer ({@code 4}), all
+     * other finite values fall through to {@link Float#toString(float)}
+     * with a trailing {@code .0} stripped when the value is an exact
+     * whole number expressed with a decimal point.
+     */
+    static String embeddingVectorToJson(final float[] v) {
+        final StringBuilder s = new StringBuilder("[");
+        for (int i = 0; i < v.length; i++) {
+            if (i > 0) s.append(", ");
+            final float x = v[i];
+            if (Float.isFinite(x) && x == (long) x) {
+                s.append(Long.toString((long) x));
+            } else {
+                s.append(Float.toString(x));
+            }
+        }
+        s.append(']');
+        return s.toString();
     }
 
     /**

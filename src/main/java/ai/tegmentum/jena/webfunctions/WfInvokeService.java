@@ -115,6 +115,23 @@ public final class WfInvokeService implements ChainingServiceExecutor {
             outputVars = collectOutputBindings(opService.getSubOp());
         }
 
+        // Thread the first positional arg's string value as an optional
+        // decode-time context hint. Only the bare `list<float32>`
+        // return branch (wf_sagegraph `embed`) consumes it — to bind
+        // `?node` alongside the emitted `?embedding` in the same row.
+        // Every other return shape ignores the hint, so wf_fulltext /
+        // wf_document / etc. are unaffected. See
+        // WitValueMarshaller#floatListToRows.
+        final String inputNodeIri;
+        if (args.length > 0) {
+            final Node first = args[0];
+            if (first.isURI()) inputNodeIri = first.getURI();
+            else if (first.isLiteral()) inputNodeIri = first.getLiteralLexicalForm();
+            else inputNodeIri = null;
+        } else {
+            inputNodeIri = null;
+        }
+
         final CallbackContext cbCtx = CallbackContext.bind(ctx);
         final List<WitValueMarshaller.Row> rows;
         try (JenaWasmInstance instance = new JenaWasmInstance(wasmUrl)) {
@@ -122,7 +139,7 @@ public final class WfInvokeService implements ChainingServiceExecutor {
             // exported function (e.g. wf:fulltext's `search`); when null,
             // the resolver falls through to prefer `evaluate` then to a
             // single top-level function export.
-            rows = instance.evaluate(spec.entryPoint, args);
+            rows = instance.evaluate(spec.entryPoint, inputNodeIri, args);
         } catch (IOException e) {
             throw new QueryException("wf-invoke: " + e.getMessage(), e);
         } finally {

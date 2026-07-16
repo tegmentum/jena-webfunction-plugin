@@ -372,6 +372,22 @@ public final class JenaWasmInstance implements Closeable {
      */
     public List<WitValueMarshaller.Row> evaluate(final String entryPointOverride,
                                                  final Node... args) throws IOException {
+        return evaluate(entryPointOverride, null, args);
+    }
+
+    /**
+     * Full-fidelity variant that also threads an optional
+     * {@code inputNodeIri} decode-time context. The decoder uses this
+     * only when the guest returns a bare {@code list<float32>} — the
+     * wf_sagegraph {@code embed} shape — to bind {@code ?node}
+     * alongside the emitted {@code ?embedding} in the same row. Every
+     * other return shape ignores the hint, so wf_fulltext /
+     * wf_document / etc. are unaffected. See
+     * {@link WitValueMarshaller#bindingSetsFromWit(WitValue, String)}.
+     */
+    public List<WitValueMarshaller.Row> evaluate(final String entryPointOverride,
+                                                 final String inputNodeIri,
+                                                 final Node... args) throws IOException {
         final String entry = resolveEntryPoint(entryPointOverride);
         // Marshal callsite args to whatever the export actually wants.
         // Legacy `evaluate(list<value>)` guests still take a single
@@ -382,7 +398,7 @@ public final class JenaWasmInstance implements Closeable {
         final Object[] callArgs = marshalTypedArgs(entry, args);
         final WitValue result = (WitValue) instance.invokeWit(entry, callArgs);
         final WitValue ok = unwrapOk(result);
-        return WitValueMarshaller.bindingSetsFromWit(ok);
+        return WitValueMarshaller.bindingSetsFromWit(ok, inputNodeIri);
     }
 
     /**
