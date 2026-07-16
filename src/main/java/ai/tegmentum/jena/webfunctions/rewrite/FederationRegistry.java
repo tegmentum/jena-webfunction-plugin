@@ -109,6 +109,19 @@ public final class FederationRegistry {
          */
         WF_RELATIONAL,
         /**
+         * Substrate {@code wf-sagegraph:} URL sugar
+         * (wf-conformance/docs/design/wf-sagegraph.md &sect;04). The
+         * federation pass emits
+         * {@code SERVICE <wf-sagegraph:<name>?node=<uri>&k=<n>>}; Jena
+         * has no native sagegraph embedder in v0.1, so the URL stays
+         * unfolded and the query will error unless a wf-sagegraph-
+         * capable backend is federated in some other way. Declared as a
+         * first-class source type so cases can register a WfSageGraph
+         * source uniformly across engines (memo &sect;13 defers real ML
+         * to v0.2+).
+         */
+        WF_SAGEGRAPH,
+        /**
          * External HTTP-hosted SPARQL endpoint. Dispatched identically
          * to {@link #SPARQL} at v0.1; kept distinct so operators can
          * flag high-latency / low-availability sources for the v0.2
@@ -574,11 +587,12 @@ public final class FederationRegistry {
             case "wf-document", "wf_document", "WfDocument" -> SourceType.WF_DOCUMENT;
             case "wf-vector", "wf_vector", "WfVector" -> SourceType.WF_VECTOR;
             case "wf-relational", "wf_relational", "WfRelational" -> SourceType.WF_RELATIONAL;
+            case "wf-sagegraph", "wf_sagegraph", "WfSageGraph" -> SourceType.WF_SAGEGRAPH;
             case "http-sparql", "http_sparql", "HttpSparql" -> SourceType.HTTP_SPARQL;
             default -> throw new IllegalArgumentException(
                     "federation registry source `" + name + "`: unknown type `" + typeStr
                             + "` (expected `sparql`, `wf-search`, `wf-fetch`, `wf-document`, "
-                            + "`wf-vector`, `wf-relational`, or `http-sparql`)");
+                            + "`wf-vector`, `wf-relational`, `wf-sagegraph`, or `http-sparql`)");
         };
     }
 

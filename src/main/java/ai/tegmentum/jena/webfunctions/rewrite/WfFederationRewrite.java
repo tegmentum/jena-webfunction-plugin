@@ -355,6 +355,12 @@ public final class WfFederationRewrite {
             // URL stays unfolded unless a wf-fetch dispatcher on the
             // JVM side grows Postgres support.
             case WF_RELATIONAL -> "wf-relational:" + src.name();
+            // wf-sagegraph v0.1 — emit the URL sugar; Jena has no
+            // sagegraph-aware URL handler in v0.1, so the emitted URL
+            // stays unfolded unless a wf-sagegraph-capable backend is
+            // federated in some other way (wf-sagegraph memo §13 defers
+            // real ML to v0.2+).
+            case WF_SAGEGRAPH -> "wf-sagegraph:" + src.name();
             case SPARQL, HTTP_SPARQL -> src.endpoint();
         };
     }
@@ -393,7 +399,7 @@ public final class WfFederationRewrite {
             // wf-vector: URL on a non-Oxigraph engine that has no
             // handler for it) is a real bug the operator should see, not
             // a network flap to mask (wf-vector memo §09).
-            case WF_SEARCH, WF_FETCH, WF_DOCUMENT, WF_VECTOR -> false;
+            case WF_SEARCH, WF_FETCH, WF_DOCUMENT, WF_VECTOR, WF_SAGEGRAPH -> false;
         };
     }
 
