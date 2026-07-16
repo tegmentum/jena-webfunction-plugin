@@ -112,6 +112,20 @@ public final class RewritePipeline {
 
     private RewritePipeline() {}
 
+    /**
+     * Resolve the wf_sagegraph.wasm URL from the {@code WF_SAGEGRAPH_WASM_URL}
+     * env var. Returns empty string when unset so
+     * {@link WfSageGraphRewrite#rewrite(Op, InvokeRegistry, String)}
+     * short-circuits — operators without the guest artifact see the
+     * sugar reach their SERVICE dispatcher and surface a normal
+     * unresolved-SERVICE error rather than a silent no-op fold.
+     * Mirrors {@code oxigraph-wf/src/main.rs} line 1263-1264.
+     */
+    private static String sagegraphWasmUrl() {
+        final String env = System.getenv("WF_SAGEGRAPH_WASM_URL");
+        return env == null ? "" : env;
+    }
+
     public static Result run(final Op op, final Context ctx) {
         Op cursor = op;
         // 1. wf:partial fold — constant expressions become opaque IRIs.
@@ -129,6 +143,21 @@ public final class RewritePipeline {
         //     HTTP-SERVICE never becomes a candidate for BGP
         //     federation. Empty registry short-circuits.
         cursor = WfVectorRewrite.rewrite(cursor, ctx.federationRegistry);
+        // 3c. wf-sagegraph guest-dispatch (wf-sagegraph memo §04 / §11):
+        //     fold SERVICE <wf-sagegraph:<name>?node=<uri>&k=N> into a
+        //     SERVICE <wf-invoke:<hex>> allocation targeting the
+        //     locally-registered wf_sagegraph guest wasm at
+        //     $WF_SAGEGRAPH_WASM_URL. Runs BEFORE WfFederationRewrite /
+        //     WfSearchRewrite / ShapeRewrite so downstream passes see
+        //     the folded shape rather than an opaque wf-sagegraph:
+        //     SERVICE they would leave alone. Unlike wf-vector, this
+        //     dispatches the guest LOCALLY (each engine registers the
+        //     wf:sagegraph/host@0.1.0 callback per wave-8); no
+        //     remote-Oxigraph federation involved. Unset wasm URL or
+        //     absent SERVICE-body wf:embedding projection →
+        //     short-circuits inside the pass.
+        cursor = WfSageGraphRewrite.rewrite(cursor, ctx.invokeRegistry,
+                sagegraphWasmUrl());
         // 4. Federation rewrite — assign registered BGP triples to their
         //    federated source and emit SERVICE clauses. Runs before
         //    wf-search so the synthesised `wf-search:` URIs are visible
