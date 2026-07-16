@@ -29,6 +29,7 @@ public final class WebFunctionConfig {
     public static final String PROP_CALLBACK_MAX_DEPTH = "webfunctions.callback.max.depth";
     public static final String PROP_CALLBACK_MAX_ROWS  = "webfunctions.callback.max.rows";
     public static final String PROP_CALLBACK_ENABLED   = "webfunctions.callback.enabled";
+    public static final String PROP_WASI_NN_ENABLED    = "webfunctions.wasinn.enabled";
 
     public static final int DEFAULT_CALLBACK_MAX_DEPTH = 100;
     public static final int DEFAULT_CALLBACK_MAX_ROWS  = 100_000;
@@ -90,6 +91,23 @@ public final class WebFunctionConfig {
     public static boolean callbackEnabled() {
         final String raw = System.getProperty(PROP_CALLBACK_ENABLED);
         return raw == null || raw.isEmpty() || Boolean.parseBoolean(raw.trim());
+    }
+
+    /**
+     * Opt-in gate for wiring wasi:nn on the linker via
+     * {@link ai.tegmentum.webassembly4j.api.DefaultLinkingContext.Builder#enableWasiNn}.
+     * Off by default: wasmtime4j-native 46.0.1-1.4.1 exposes the JNI
+     * shim (JniComponentLinker#nativeEnableWasiNn), but the shipped
+     * wasmtime native library is not yet built with the cargo
+     * {@code wasi-nn} feature, so an unconditional call errors every
+     * component instantiate with "WASI-NN support not compiled in".
+     * Guests that don't import wasi:nn are unaffected either way;
+     * flipping this to true is only useful once a wasi-nn-enabled
+     * wasmtime4j-native ships (tracked upstream).
+     */
+    public static boolean wasiNnEnabled() {
+        final String raw = System.getProperty(PROP_WASI_NN_ENABLED);
+        return raw != null && !raw.isEmpty() && Boolean.parseBoolean(raw.trim());
     }
 
     /**

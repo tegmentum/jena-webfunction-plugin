@@ -8,6 +8,7 @@ import ai.tegmentum.webassembly4j.api.Component;
 import ai.tegmentum.webassembly4j.api.ComponentInstance;
 import ai.tegmentum.webassembly4j.api.DefaultLinkingContext;
 import ai.tegmentum.webassembly4j.api.Engine;
+import ai.tegmentum.webassembly4j.api.WasiNnConfig;
 import ai.tegmentum.wasmtime4j.wit.WitResult;
 import ai.tegmentum.wasmtime4j.wit.WitString;
 import ai.tegmentum.wasmtime4j.wit.WitU64;
@@ -277,30 +278,20 @@ public final class JenaWasmInstance implements Closeable {
         // inference, errors} (component-model ABI, ORT / ONNX backend) so it
         // can run degree-features inference in-guest, byte-identical to the
         // Rust engines that already carry it (oxigraph-wf / qlever-wf @
-        // substrate v0.4). The wasmtime4j upstream that backs this provider
-        // exposes ComponentLinker#enableWasiNn(WasiNnConfig) from
-        // 46.0.1-1.4.0 onward, and the JVM WasmInstance registration is the
-        // final missing piece of substrate v0.4 for the JVM engines.
-        //
-        // BLOCK. This plugin composes its linker via
-        // webassembly4j.api.DefaultLinkingContext.Builder, whose native
-        // realisation is wasmtime4j-provider's WasmtimeComponentAdapter#
-        // doInstantiate — which creates the wasmtime4j ComponentLinker
-        // internally and never surfaces it to callers. There is no
-        // enableWasiNn on the webassembly4j Builder, and no unwrap() escape
-        // hatch on Component/LinkingContext. Adding LinkingContext.Builder#
-        // enableWasiNn(WasiNnConfig) to webassembly4j-api and threading it
-        // through wasmtime4j-provider is the follow-up. That change is out
-        // of scope for the current pass (the scope fence restricts edits to
-        // wasmtime4j itself + this file's pom bump). Once webassembly4j
-        // exposes the hook, the wiring is one line:
-        //
-        //     if (WebFunctionConfig.wasiNnEnabled()) {
-        //         linker.enableWasiNn(WasiNnConfig.defaults());
-        //     }
-        //
-        // See the wasmtime4j 46.0.1-1.4.0 CHANGELOG and
-        // wasmtime4j.wasi.nn.WasiNnConfig javadoc for the shape.
+        // substrate v0.4). webassembly4j 2.4.0 exposes
+        // DefaultLinkingContext.Builder#enableWasiNn(WasiNnConfig), which
+        // wasmtime4j-provider forwards to wasmtime4j 46.0.1-1.4.1's
+        // ComponentLinker#enableWasiNn hook. Gated behind
+        // {@code webfunctions.wasinn.enabled} because the shipped
+        // wasmtime4j-native (1.4.1) is not yet built with the cargo
+        // {@code wasi-nn} feature — an unconditional call errors every
+        // component instantiate with "WASI-NN support not compiled in",
+        // blocking guests that never import wasi:nn. Flip the property
+        // to true once a wasi-nn-enabled native lands; the wiring here
+        // does not need to change.
+        if (WebFunctionConfig.wasiNnEnabled()) {
+            linker.enableWasiNn(WasiNnConfig.defaults());
+        }
         this.instance = component.instantiate(linker.build());
     }
 
