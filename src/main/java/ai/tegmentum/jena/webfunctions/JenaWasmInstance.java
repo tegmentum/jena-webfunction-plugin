@@ -253,6 +253,19 @@ public final class JenaWasmInstance implements Closeable {
         linker.addWitHostFunction(
             "wf:document/host@1.3.0#http-post-json",
             HostCallbacks.httpPostJson());
+        // wf:sagegraph/host@0.1.0 — one import,
+        // `execute-query(sparql) -> result<string, string>`. The
+        // wf_sagegraph guest imports it to issue k-hop neighborhood SPARQL
+        // round-trips back into the engine hosting it (see the wf-sagegraph
+        // memo §04 / §11). Return payload is raw SPARQL 1.1 Results JSON
+        // (guest parses); implementation reuses the existing
+        // CallbackContext.executeSelect executor that already backs the
+        // stardog:webfunction/host callbacks and serializes through Jena's
+        // ResultSetFormatter#outputAsJSON. Additive: guests that never
+        // import wf:sagegraph see no change in behaviour.
+        linker.addWitHostFunction(
+            "wf:sagegraph/host@0.1.0#execute-query",
+            HostCallbacks.sagegraphExecuteQuery());
         this.instance = component.instantiate(linker.build());
     }
 

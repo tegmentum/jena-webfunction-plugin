@@ -449,6 +449,55 @@ public final class HostCallbacks {
     }
 
     /**
+     * {@code wf:sagegraph/host@0.1.0#execute-query:
+     *  func(sparql: string) -> result<string, string>}.
+     *
+     * <p>The wf_sagegraph guest imports this to issue k-hop neighborhood
+     * SPARQL round-trips back into the engine hosting it. Unlike the
+     * {@code stardog:webfunction/host} family's {@link #executeQuery} — which
+     * hands back a WIT-encoded {@code binding-sets} record — this one returns
+     * raw SPARQL 1.1 Results JSON as a string and lets the guest parse it.
+     * Same shape wf_document / wf_fulltext expose via {@code http-post-json};
+     * sagegraph just reaches the local engine instead of an external service.
+     *
+     * <p>Reuses {@link CallbackContext#executeSelect} — the same executor
+     * behind the stardog:webfunction/host callbacks — then serializes with
+     * Jena's {@link org.apache.jena.query.ResultSetFormatter#outputAsJSON}
+     * for SELECT / CONSTRUCT / DESCRIBE / ASK all through the ResultSet
+     * envelope that {@code executeSelect} already unifies on.
+     */
+    public static WitHostFunction sagegraphExecuteQuery() {
+        return args -> {
+            if (!WebFunctionConfig.callbackEnabled()) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback disabled by webfunctions.callback.enabled=false")) };
+            }
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "wf callback: no context bound — WfCall must bind CallbackContext "
+                    + "at the top of exec()")) };
+            }
+            try {
+                final String sparql = ((ComponentVal) args[0]).asString();
+                ctx.enter();
+                try {
+                    final ResultSet rs = ctx.executeSelect(sparql, new QuerySolutionMap());
+                    final java.io.ByteArrayOutputStream buf = new java.io.ByteArrayOutputStream();
+                    org.apache.jena.query.ResultSetFormatter.outputAsJSON(buf, rs);
+                    return new Object[] { ComponentVal.ok(ComponentVal.string(
+                        buf.toString(java.nio.charset.StandardCharsets.UTF_8))) };
+                } finally {
+                    ctx.exit();
+                }
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
+    /**
      * {@code wf:fulltext/host@0.1.0#http-post-json:
      *  func(url: string, body: string) -> result<string, string>}.
      *
