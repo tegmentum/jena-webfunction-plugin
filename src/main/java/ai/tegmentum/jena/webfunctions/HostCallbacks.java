@@ -566,6 +566,155 @@ public final class HostCallbacks {
         }
     }
 
+    /**
+     * {@code wf:embed/host@0.1.0#embed-text:
+     *  func(text: string, model: string) -> result<list<f32>, string>}.
+     *
+     * <p>Substrate-side text-embedding host callback. Deterministic
+     * SHA-256-derived stub — bit-for-bit identical output to the earlier
+     * Rust-engine stub landing (oxigraph-wf {@code d07c2d6},
+     * qlever-wf-runtime {@code register_wf_embed_host_import} stub) so
+     * cross-engine parity holds while the substrate does not yet have a
+     * JVM-native fastembed backend. A real ONNX-Runtime-Java path can slot
+     * in behind the same signature later; the Rust side already ships
+     * real fastembed-rs at {@code b9194c5} for the eventual byte-parity
+     * pin.
+     *
+     * <p>Algorithm — matches {@code embed_text_stub} in
+     * {@code oxigraph-wf/src/host.rs}:
+     * <ol>
+     *   <li>Dispatch model → dim via {@link #embedModelCatalog()}
+     *       (default 384 for unknown).</li>
+     *   <li>Hash {@code model || 0x00 || text || 0x00 || counter_le}
+     *       under SHA-256, incrementing {@code counter} until we have
+     *       {@code dim * 4} bytes.</li>
+     *   <li>Read each 4-byte window as a little-endian signed i32,
+     *       map to {@code [-1, 1]} via {@code raw / (float) Integer.MAX_VALUE}.</li>
+     *   <li>L2-normalise so cosine-similarity consumers see unit vectors.</li>
+     * </ol>
+     *
+     * <p>Empty text → {@code Err("embed-text: text is empty")}.
+     */
+    public static WitHostFunction embedText() {
+        return args -> {
+            try {
+                final String text = ((ComponentVal) args[0]).asString();
+                final String model = ((ComponentVal) args[1]).asString();
+                if (text.isEmpty()) {
+                    return new Object[] { ComponentVal.err(ComponentVal.string(
+                        "embed-text: text is empty")) };
+                }
+                final float[] vec = embedTextStub(text, model);
+                final List<ComponentVal> vals = new ArrayList<>(vec.length);
+                for (float v : vec) {
+                    vals.add(ComponentVal.f32(v));
+                }
+                return new Object[] { ComponentVal.ok(ComponentVal.list(vals)) };
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(ComponentVal.string(
+                    "embed-text: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
+            }
+        };
+    }
+
+    /**
+     * {@code wf:embed/host@0.1.0#list-models: func() -> list<string>}.
+     *
+     * <p>Enumerates the model names the substrate registration recognises.
+     * Byte-identical to the Rust-side catalog so cross-engine calls to
+     * this import see the same ordered list.
+     */
+    public static WitHostFunction embedListModels() {
+        return args -> {
+            final String[][] catalog = embedModelCatalog();
+            final List<ComponentVal> vals = new ArrayList<>(catalog.length);
+            for (String[] pair : catalog) {
+                vals.add(ComponentVal.string(pair[0]));
+            }
+            return new Object[] { ComponentVal.list(vals) };
+        };
+    }
+
+    /**
+     * Model → embedding-dimension catalog for the wf:embed v0.1 stub.
+     * Names + dims mirror {@code fastembed-rs} so a future swap to real
+     * inference is a signature-compatible substitution. Held in lockstep
+     * with {@code oxigraph-wf::host::embed_model_catalog}.
+     */
+    private static String[][] embedModelCatalog() {
+        return new String[][] {
+            {"bge-small-en",     "384"},
+            {"all-MiniLM-L6-v2", "384"},
+            {"bge-base-en",      "768"},
+            {"nomic-embed-text", "768"},
+            {"bge-large-en",     "1024"},
+        };
+    }
+
+    /**
+     * Deterministic SHA-256-derived embedding matching the Rust
+     * {@code embed_text_stub} in {@code oxigraph-wf/src/host.rs} (commit
+     * {@code d07c2d6}) so cross-engine byte parity holds.
+     */
+    static float[] embedTextStub(final String text, final String model) {
+        int dim = 384;
+        for (String[] pair : embedModelCatalog()) {
+            if (pair[0].equalsIgnoreCase(model)) {
+                dim = Integer.parseInt(pair[1]);
+                break;
+            }
+        }
+        final int bytesNeeded = Math.multiplyExact(dim, 4);
+        final byte[] bytes = new byte[((bytesNeeded + 31) / 32) * 32];
+        final byte[] modelBytes = model.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        final byte[] textBytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        int counter = 0;
+        int offset = 0;
+        final java.security.MessageDigest md;
+        try {
+            md = java.security.MessageDigest.getInstance("SHA-256");
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 unavailable in this JVM", e);
+        }
+        while (offset < bytesNeeded) {
+            md.reset();
+            md.update(modelBytes);
+            md.update((byte) 0);
+            md.update(textBytes);
+            md.update((byte) 0);
+            md.update((byte) (counter & 0xff));
+            md.update((byte) ((counter >>> 8) & 0xff));
+            md.update((byte) ((counter >>> 16) & 0xff));
+            md.update((byte) ((counter >>> 24) & 0xff));
+            final byte[] digest = md.digest();
+            System.arraycopy(digest, 0, bytes, offset, digest.length);
+            offset += digest.length;
+            counter++;
+        }
+        final float[] out = new float[dim];
+        for (int i = 0; i < dim; i++) {
+            final int b0 = bytes[i * 4]     & 0xff;
+            final int b1 = bytes[i * 4 + 1] & 0xff;
+            final int b2 = bytes[i * 4 + 2] & 0xff;
+            final int b3 = bytes[i * 4 + 3] & 0xff;
+            final int raw = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+            out[i] = (float) raw / (float) Integer.MAX_VALUE;
+        }
+        // Rust reference: `let norm: f32 = out.iter().map(|x| x*x).sum::<f32>().sqrt();`
+        // Mirror the f32 accumulation + f32 sqrt exactly — a
+        // double-accumulated variant drifts a few ULP by dim 384 and
+        // breaks the cross-engine byte-parity contract.
+        float norm = 0.0f;
+        for (float f : out) norm += f * f;
+        norm = (float) Math.sqrt((double) norm);
+        if (norm > 0.0f) {
+            for (int i = 0; i < dim; i++) {
+                out[i] = out[i] / norm;
+            }
+        }
+        return out;
+    }
+
     /** {@code execute-update: func(sparql: string, bindings: list<binding>)
      *  -> result<_, string>}  (v0.3.1). */
     public static WitHostFunction executeUpdate() {

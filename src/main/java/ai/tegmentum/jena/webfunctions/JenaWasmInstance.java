@@ -274,6 +274,27 @@ public final class JenaWasmInstance implements Closeable {
         linker.addWitHostFunction(
             "wf:sagegraph/host@0.2.0#http-post-json",
             HostCallbacks.httpPostJson());
+        // wf:embed/host@0.1.0 — two imports:
+        //   `embed-text(text, model) -> result<list<f32>, string>`
+        //   `list-models() -> list<string>`
+        // The wf_sagegraph_nn guest imports this in its text-attributed
+        // feature mode (memo §06); guests that don't opt into text mode
+        // never touch it, so this registration is additive. WIT lives at
+        // ~/git/tegmentum-webfunctions/crates/wf_embed/wit/wf-embed.wit.
+        // v0.1 implementation is a deterministic SHA-256-derived stub
+        // that mirrors the Rust-side earlier stub landing (oxigraph-wf
+        // d07c2d6 / qlever-wf-runtime register_wf_embed_host_import
+        // stub) byte-for-byte so cross-engine parity holds while the
+        // substrate does not yet have a JVM-native fastembed backend.
+        // A real ONNX-Runtime-Java swap is a signature-compatible
+        // follow-up (v0.5 track); the Rust side already ships real
+        // fastembed-rs at b9194c5 for the eventual byte-parity pin.
+        linker.addWitHostFunction(
+            "wf:embed/host@0.1.0#embed-text",
+            HostCallbacks.embedText());
+        linker.addWitHostFunction(
+            "wf:embed/host@0.1.0#list-models",
+            HostCallbacks.embedListModels());
         // wasi:nn — the wf_sagegraph_nn guest imports wasi:nn/{graph, tensor,
         // inference, errors} (component-model ABI, ORT / ONNX backend) so it
         // can run degree-features inference in-guest, byte-identical to the
