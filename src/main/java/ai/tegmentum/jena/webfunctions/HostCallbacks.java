@@ -570,17 +570,33 @@ public final class HostCallbacks {
      * {@code wf:embed/host@0.1.0#embed-text:
      *  func(text: string, model: string) -> result<list<f32>, string>}.
      *
-     * <p>Substrate-side text-embedding host callback. Deterministic
-     * SHA-256-derived stub — bit-for-bit identical output to the earlier
-     * Rust-engine stub landing (oxigraph-wf {@code d07c2d6},
-     * qlever-wf-runtime {@code register_wf_embed_host_import} stub) so
-     * cross-engine parity holds while the substrate does not yet have a
-     * JVM-native fastembed backend. A real ONNX-Runtime-Java path can slot
-     * in behind the same signature later; the Rust side already ships
-     * real fastembed-rs at {@code b9194c5} for the eventual byte-parity
-     * pin.
+     * <p>Substrate-side text-embedding host callback. Dispatches through
+     * one of two paths, chosen at each call by the {@code WF_EMBED_SIDECAR_URL}
+     * environment variable:
      *
-     * <p>Algorithm — matches {@code embed_text_stub} in
+     * <ul>
+     *   <li><b>Env set → sidecar dispatch (Option B).</b> POST
+     *       {@code {"text": ..., "model": ...}} to the configured URL,
+     *       parse {@code {"embedding": [f32, ...]}} from the response, and
+     *       return those bytes verbatim. When the sidecar is
+     *       {@code fastembed-rs}-backed with the same on-disk model as the
+     *       Rust engines' embedded {@code fastembed::TextEmbedding}, this
+     *       gives cross-engine byte parity — the pinned
+     *       {@code sagegraph_text_features} expected_bindings are
+     *       fastembed-rs {@code bge-small-en} output; a fastembed-rs
+     *       sidecar reproduces those bytes.</li>
+     *   <li><b>Env unset → deterministic SHA-256-derived stub fallback.</b>
+     *       Bit-for-bit identical output to the earlier Rust-engine stub
+     *       landing (oxigraph-wf {@code d07c2d6}, qlever-wf-runtime
+     *       {@code register_wf_embed_host_import} stub). Emits a one-shot
+     *       warning on stderr so operators know the plugin fell back.
+     *       Kept so JVM engines still resolve the wf:embed import even
+     *       without a sidecar deployed; cross-engine byte parity does NOT
+     *       hold against Rust engines' real fastembed output in this
+     *       mode.</li>
+     * </ul>
+     *
+     * <p>Stub algorithm — matches {@code embed_text_stub} in
      * {@code oxigraph-wf/src/host.rs}:
      * <ol>
      *   <li>Dispatch model → dim via {@link #embedModelCatalog()}
@@ -593,7 +609,11 @@ public final class HostCallbacks {
      *   <li>L2-normalise so cosine-similarity consumers see unit vectors.</li>
      * </ol>
      *
-     * <p>Empty text → {@code Err("embed-text: text is empty")}.
+     * <p>Empty text → {@code Err("embed-text: text is empty")}. Sidecar
+     * transport / parse errors → {@code Err("embed-text: <details>")}; the
+     * fallback stub is only reached when the env var is unset (a
+     * deliberately-configured sidecar returning HTTP 500 surfaces the 500
+     * rather than being silently masked by stub bytes).
      */
     public static WitHostFunction embedText() {
         return args -> {
@@ -604,7 +624,14 @@ public final class HostCallbacks {
                     return new Object[] { ComponentVal.err(ComponentVal.string(
                         "embed-text: text is empty")) };
                 }
-                final float[] vec = embedTextStub(text, model);
+                final String sidecarUrl = System.getenv(EMBED_SIDECAR_URL_ENV);
+                final float[] vec;
+                if (sidecarUrl != null && !sidecarUrl.isEmpty()) {
+                    vec = embedTextViaSidecar(text, model, sidecarUrl);
+                } else {
+                    warnStubFallbackOnce();
+                    vec = embedTextStub(text, model);
+                }
                 final List<ComponentVal> vals = new ArrayList<>(vec.length);
                 for (float v : vec) {
                     vals.add(ComponentVal.f32(v));
@@ -615,6 +642,150 @@ public final class HostCallbacks {
                     "embed-text: " + (e.getMessage() == null ? e.toString() : e.getMessage()))) };
             }
         };
+    }
+
+    /** Env var name for the {@link #embedText} sidecar dispatch URL. */
+    static final String EMBED_SIDECAR_URL_ENV = "WF_EMBED_SIDECAR_URL";
+
+    /**
+     * One-shot gate for the "fell back to SHA-256 stub" warning. Wrapped
+     * in an {@link java.util.concurrent.atomic.AtomicBoolean} so the log
+     * line fires once per JVM regardless of how many wf:call frames hit
+     * the fallback path.
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean
+        STUB_FALLBACK_WARNED = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    private static void warnStubFallbackOnce() {
+        if (STUB_FALLBACK_WARNED.compareAndSet(false, true)) {
+            System.err.println(
+                "wf:embed: " + EMBED_SIDECAR_URL_ENV + " unset — falling back to "
+                + "deterministic SHA-256 stub. Cross-engine byte parity vs Rust "
+                + "engines' real fastembed output does NOT hold in this mode. "
+                + "Point " + EMBED_SIDECAR_URL_ENV + " at a fastembed-rs HTTP "
+                + "sidecar to restore parity.");
+        }
+    }
+
+    /**
+     * POST {@code {"text": ..., "model": ...}} to the sidecar and parse
+     * {@code {"embedding": [f32, ...]}} out of the response body. Any
+     * transport / parse failure surfaces as a
+     * {@link RuntimeException} so the outer {@link #embedText} envelope
+     * turns it into a WIT {@code Err} rather than falling back to the
+     * stub (see {@link #embedText} javadoc for the rationale).
+     */
+    static float[] embedTextViaSidecar(final String text, final String model,
+                                       final String sidecarUrl) {
+        final java.net.URI uri;
+        try {
+            uri = java.net.URI.create(sidecarUrl);
+        } catch (IllegalArgumentException iae) {
+            throw new IllegalStateException(
+                "sidecar url did not parse: " + iae.getMessage(), iae);
+        }
+        final String body =
+            "{\"text\":" + jsonEscape(text)
+            + ",\"model\":" + jsonEscape(model) + "}";
+        final java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(30))
+                .build();
+        final java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri)
+                .timeout(java.time.Duration.ofSeconds(60))
+                .header("Content-Type", "application/json")
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(
+                    body, java.nio.charset.StandardCharsets.UTF_8))
+                .build();
+        final java.net.http.HttpResponse<String> response;
+        try {
+            response = client.send(request, java.net.http.HttpResponse.BodyHandlers.ofString(
+                java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.io.IOException ioe) {
+            throw new IllegalStateException(
+                "sidecar transport: " + (ioe.getMessage() == null ? ioe.toString() : ioe.getMessage()), ioe);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("sidecar transport: interrupted", ie);
+        }
+        final int status = response.statusCode();
+        if (status < 200 || status >= 300) {
+            throw new IllegalStateException(
+                "sidecar HTTP " + status + ": " + response.body());
+        }
+        return parseEmbeddingArray(response.body());
+    }
+
+    /**
+     * Extract the {@code "embedding"} array of floats from the sidecar's
+     * JSON response. Deliberately minimal — we don't want to pull a JSON
+     * library into this class just for one two-field payload. Handles the
+     * common shapes: {@code {"embedding": [1.0, 2.0, ...]}}, tolerant of
+     * whitespace and scientific notation. Anything else raises so the
+     * caller can surface a WIT {@code Err} with the raw body prefix.
+     */
+    static float[] parseEmbeddingArray(final String responseBody) {
+        final int keyIdx = responseBody.indexOf("\"embedding\"");
+        if (keyIdx < 0) {
+            throw new IllegalStateException(
+                "sidecar response missing 'embedding' key: "
+                + truncate(responseBody, 200));
+        }
+        final int openBracket = responseBody.indexOf('[', keyIdx);
+        if (openBracket < 0) {
+            throw new IllegalStateException(
+                "sidecar response 'embedding' is not an array: "
+                + truncate(responseBody, 200));
+        }
+        final int closeBracket = responseBody.indexOf(']', openBracket);
+        if (closeBracket < 0) {
+            throw new IllegalStateException(
+                "sidecar response 'embedding' array is unterminated: "
+                + truncate(responseBody, 200));
+        }
+        final String inner = responseBody.substring(openBracket + 1, closeBracket).trim();
+        if (inner.isEmpty()) {
+            return new float[0];
+        }
+        final String[] parts = inner.split(",");
+        final float[] out = new float[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            try {
+                out[i] = Float.parseFloat(parts[i].trim());
+            } catch (NumberFormatException nfe) {
+                throw new IllegalStateException(
+                    "sidecar 'embedding'[" + i + "] not a f32: " + parts[i].trim(), nfe);
+            }
+        }
+        return out;
+    }
+
+    private static String jsonEscape(final String s) {
+        final StringBuilder sb = new StringBuilder(s.length() + 2);
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            final char c = s.charAt(i);
+            switch (c) {
+                case '"':  sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\b': sb.append("\\b");  break;
+                case '\f': sb.append("\\f");  break;
+                case '\n': sb.append("\\n");  break;
+                case '\r': sb.append("\\r");  break;
+                case '\t': sb.append("\\t");  break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        sb.append('"');
+        return sb.toString();
+    }
+
+    private static String truncate(final String s, final int max) {
+        return s.length() <= max ? s : s.substring(0, max) + "…";
     }
 
     /**
