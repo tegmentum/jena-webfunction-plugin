@@ -679,7 +679,9 @@ public final class HostCallbacks {
                                        final String sidecarUrl) {
         final java.net.URI uri;
         try {
-            uri = java.net.URI.create(sidecarUrl);
+            // wf_embed_sidecar registers POST /embed; strip any trailing slashes
+            // from the configured base URL before appending the endpoint path.
+            uri = java.net.URI.create(sidecarUrl.replaceAll("/+$", "") + "/embed");
         } catch (IllegalArgumentException iae) {
             throw new IllegalStateException(
                 "sidecar url did not parse: " + iae.getMessage(), iae);
@@ -687,7 +689,14 @@ public final class HostCallbacks {
         final String body =
             "{\"text\":" + jsonEscape(text)
             + ",\"model\":" + jsonEscape(model) + "}";
+        // wf_embed_sidecar is backed by tiny_http, which speaks HTTP/1.1
+        // only. Java's HttpClient defaults to HTTP/2 (with h2c upgrade on
+        // plain HTTP), and the client hangs waiting for an upgrade
+        // acknowledgement the sidecar never sends — surfaces as `request
+        // timed out` at the configured deadline. Pin the client to HTTP/1.1
+        // so the request round-trips against the sidecar's actual protocol.
         final java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .version(java.net.http.HttpClient.Version.HTTP_1_1)
                 .connectTimeout(java.time.Duration.ofSeconds(30))
                 .build();
         final java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder(uri)
