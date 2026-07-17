@@ -46,6 +46,22 @@
         <jena.version>6.1.0</jena.version>
         <webassembly4j.version>2.4.1</webassembly4j.version>
         <wasmtime4j.version>46.0.1-1.4.2</wasmtime4j.version>
+        <!--
+            wasi-nn classifier for the wasmtime4j-native artifact. The plain
+            (classifier-less) artifact is built without wasi-nn; the wasi-nn
+            classifier variant links wasmtime-wasi-nn + a dynamically-loaded
+            libonnxruntime.
+
+            Default is 'wasi-nn' (fat jar with all-platform natives, suitable
+            for dev). CI/release builds can override with a platform-specific
+            classifier via '-Dwasi-nn.classifier=wasi-nn-linux-x86_64'.
+
+            Only takes effect when the child JVM sets
+            -Dwebfunctions.wasinn.enabled=true; without that flag the plugin
+            does not call ComponentLinker#enableWasiNn and the extra ort
+            symbols in the native are inert.
+        -->
+        <wasi-nn.classifier>wasi-nn</wasi-nn.classifier>
         <junit.version>4.13.2</junit.version>
         <assertj.version>3.24.2</assertj.version>
         <testcontainers.version>2.0.5</testcontainers.version>
@@ -97,6 +113,25 @@
             <artifactId>wasmtime4j-native</artifactId>
             <version>${wasmtime4j.version}</version>
             <classifier>linux-x86_64</classifier>
+        </dependency>
+        <!--
+            wasi-nn variant of the native. Ships libwasmtime4j.{so,dylib,dll}
+            linked against wasmtime-wasi-nn + libonnxruntime (dynamically
+            loaded at runtime — deployment host must have libonnxruntime on
+            the loader path).
+
+            Kept as a runtime-scoped supplement to the classifier-less native
+            above: when the child JVM is launched with
+            -Dwebfunctions.wasinn.enabled=true, the wasi-nn native is
+            preferred; otherwise the plain native is used and the wasi-nn
+            classifier jar is dead weight (~130KB shaded).
+        -->
+        <dependency>
+            <groupId>ai.tegmentum</groupId>
+            <artifactId>wasmtime4j-native</artifactId>
+            <version>${wasmtime4j.version}</version>
+            <classifier>${wasi-nn.classifier}</classifier>
+            <scope>runtime</scope>
         </dependency>
 
         <!--
