@@ -45,7 +45,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jena.version>6.1.0</jena.version>
         <webassembly4j.version>2.4.1</webassembly4j.version>
-        <wasmtime4j.version>46.0.1-1.4.4</wasmtime4j.version>
+        <wasmtime4j.version>46.0.1-1.4.5</wasmtime4j.version>
         <!--
             wasi-nn classifier for the wasmtime4j-native artifact. The plain
             (classifier-less) artifact is built without wasi-nn; the wasi-nn
