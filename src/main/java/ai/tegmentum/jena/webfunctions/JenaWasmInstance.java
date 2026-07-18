@@ -9,6 +9,7 @@ import ai.tegmentum.webassembly4j.api.ComponentInstance;
 import ai.tegmentum.webassembly4j.api.DefaultLinkingContext;
 import ai.tegmentum.webassembly4j.api.Engine;
 import ai.tegmentum.webassembly4j.api.WasiNnConfig;
+import ai.tegmentum.webassembly4j.api.config.ComponentConfig;
 import ai.tegmentum.wasmtime4j.wit.WitResult;
 import ai.tegmentum.wasmtime4j.wit.WitString;
 import ai.tegmentum.wasmtime4j.wit.WitU64;
@@ -313,7 +314,17 @@ public final class JenaWasmInstance implements Closeable {
         if (WebFunctionConfig.wasiNnEnabled()) {
             linker.enableWasiNn(WasiNnConfig.defaults());
         }
-        this.instance = component.instantiate(linker.build());
+        // Wire per-instance memory ceiling through webassembly4j 2.4.1's
+        // ComponentConfig. Unset system-property → provider default (no
+        // cap); an explicit `webfunctions.memory.max.bytes` traps guest
+        // allocations that exceed the cap. Symmetric with the sibling
+        // StardogWasmInstance so cross-engine parity of the memory
+        // control knob holds.
+        final ComponentConfig.Builder cfg = ComponentConfig.builder();
+        WebFunctionConfig.resourceLimitsFromSystemProperties()
+                .maxMemoryBytes()
+                .ifPresent(cfg::maxMemoryBytes);
+        this.instance = component.instantiate(linker.build(), cfg.build());
     }
 
     private static Engine sharedEngine() {
