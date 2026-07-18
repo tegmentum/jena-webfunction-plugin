@@ -37,33 +37,59 @@ import java.util.TreeSet;
 /**
  * Marshalling between Jena {@link Node} and the WIT value model.
  *
- * <p>The base value model (variant/literal/binding shapes) lives in the
- * tegmentum:webfunction package at src/main/wit/base/types.wit; the
- * Stardog-only accuracy enum and cardinality record live in the
- * stardog:webfunction@0.3.0 overlay at src/main/wit/overlay/planner.wit.
- * The WitType instances below still mirror the pre-split
- * stardog:webfunction@0.2.0 shape verbatim — value is still a 3-arm
- * variant (iri/literal/bnode), literal fields are still label/datatype/
- * lang, binding fields are still name/value. The overlay adopts the
- * base's renamed fields at the WIT layer; the Java-side marshalling
- * intentionally stays on the old shape in this commit and is
- * regenerated in the follow-up commit that lands the new type
- * descriptors alongside the migrated stardog test crates.
+ * <p>The value model mirrors the tegmentum:webfunction/types@0.1.0 base
+ * (src/main/wit/base/types.wit) and the stardog:webfunction/planner@0.3.0
+ * overlay (src/main/wit/overlay/planner.wit). The plugin's runtime
+ * dispatch (JenaWasmInstance) still uses the flat-world exports
+ * (evaluate / aggregate-step / aggregate-finish / cardinality-estimate
+ * / doc) rather than the base's sparql-extension world, so this
+ * marshaller pairs those exports with the base's TYPE shapes:
  *
- * <p>The plugin has no in-repo test wasm crates — it reuses the
- * component-mode crates from the sibling stardog-webfunction-plugin
- * (to_upper_component / multi_var_component / sum_component), which
- * were migrated onto tegmentum:webfunction/types@0.1.0 shapes as part
- * of the Agent A landing in that repo. HostCallbacks.java still
- * constructs ComponentVal bindings using the pre-split field names
- * (name/label/lang, iri/bnode arms); alignment with the base's
- * host-callbacks interface is part of the full sparql-extension
- * migration follow-up.
+ * <ul>
+ *   <li>{@code term} variant (4 arms — named-node / blank-node /
+ *       literal / triple) instead of the pre-R5 {@code value} 3-arm
+ *       variant. Quoted triples cannot flow through Jena's ARQ
+ *       evaluation surface (a {@code Node_Triple} would need a
+ *       reified dance the callers here don't set up), so a returned
+ *       {@code triple(...)} arm is rejected with an
+ *       IllegalArgumentException at the boundary.</li>
+ *   <li>{@code literal.value} (was {@code label}),
+ *       {@code literal.datatype: option<iri>} (was string), and
+ *       {@code literal.language} (was {@code lang}).</li>
+ *   <li>{@code binding.variable} (was {@code name}).</li>
+ * </ul>
+ *
+ * <p>The migrated component-mode test crates in the sibling
+ * stardog-webfunction-plugin (to_upper_component / multi_var_component
+ * / sum_component) emit against a matching
+ * stardog:webfunction-test@0.3.0 test-only WIT that reuses these type
+ * shapes verbatim; the wasm artifacts produced there and this
+ * marshaller therefore land the two sides of the type contract
+ * together.
+ *
+ * <p>HostCallbacks.java continues to encode/decode ComponentVal
+ * bindings using the pre-split field names (name/label/lang,
+ * iri/bnode arms). The host-import wire shape is negotiated with the
+ * un-migrated shared crates under ~/git/webfunctions/crates/* which
+ * still declare the pre-split stardog:webfunction@0.3.x WIT world;
+ * flipping HostCallbacks would break those guests. Aligning
+ * HostCallbacks with the base's host-callbacks interface is part of
+ * the full sparql-extension migration follow-up, which is blocked on
+ * webassembly4j resource-handle dispatch.
+ *
+ * <p>The domain-specific decode paths ({@link #hitListToRows},
+ * {@link #floatListToRows}) unmarshal guest returns that are outside
+ * the base {@code binding-sets} record ({@code list<hit>},
+ * {@code list<float32>}) — their field names are dictated by the
+ * wf_fulltext / wf_document / wf_sagegraph guest shapes and don't
+ * change with the base rename.
  */
 public final class WitValueMarshaller {
 
     static final WitType LITERAL_TYPE;
-    static final WitType VALUE_TYPE;
+    static final WitType FLAT_TERM_TYPE;
+    static final WitType QUOTED_TRIPLE_TYPE;
+    static final WitType TERM_TYPE;
     static final WitType BINDING_TYPE;
     static final WitType BINDING_SETS_TYPE;
     static final WitType ACCURACY_TYPE;
@@ -71,20 +97,33 @@ public final class WitValueMarshaller {
 
     static {
         final Map<String, WitType> literalFields = new LinkedHashMap<>();
-        literalFields.put("label", WitType.createString());
-        literalFields.put("datatype", WitType.createString());
-        literalFields.put("lang", WitType.option(WitType.createString()));
+        literalFields.put("value", WitType.createString());
+        literalFields.put("datatype", WitType.option(WitType.createString()));
+        literalFields.put("language", WitType.option(WitType.createString()));
         LITERAL_TYPE = WitType.record("literal", literalFields);
 
-        final Map<String, Optional<WitType>> valueCases = new LinkedHashMap<>();
-        valueCases.put("iri", Optional.of(WitType.createString()));
-        valueCases.put("literal", Optional.of(LITERAL_TYPE));
-        valueCases.put("bnode", Optional.of(WitType.createString()));
-        VALUE_TYPE = WitType.variant("value", valueCases);
+        final Map<String, Optional<WitType>> flatTermCases = new LinkedHashMap<>();
+        flatTermCases.put("named-node", Optional.of(WitType.createString()));
+        flatTermCases.put("blank-node", Optional.of(WitType.createString()));
+        flatTermCases.put("literal", Optional.of(LITERAL_TYPE));
+        FLAT_TERM_TYPE = WitType.variant("flat-term", flatTermCases);
+
+        final Map<String, WitType> quotedTripleFields = new LinkedHashMap<>();
+        quotedTripleFields.put("subject", FLAT_TERM_TYPE);
+        quotedTripleFields.put("predicate", FLAT_TERM_TYPE);
+        quotedTripleFields.put("object", FLAT_TERM_TYPE);
+        QUOTED_TRIPLE_TYPE = WitType.record("quoted-triple", quotedTripleFields);
+
+        final Map<String, Optional<WitType>> termCases = new LinkedHashMap<>();
+        termCases.put("named-node", Optional.of(WitType.createString()));
+        termCases.put("blank-node", Optional.of(WitType.createString()));
+        termCases.put("literal", Optional.of(LITERAL_TYPE));
+        termCases.put("triple", Optional.of(QUOTED_TRIPLE_TYPE));
+        TERM_TYPE = WitType.variant("term", termCases);
 
         final Map<String, WitType> bindingFields = new LinkedHashMap<>();
-        bindingFields.put("name", WitType.createString());
-        bindingFields.put("value", VALUE_TYPE);
+        bindingFields.put("variable", WitType.createString());
+        bindingFields.put("value", TERM_TYPE);
         BINDING_TYPE = WitType.record("binding", bindingFields);
 
         final Map<String, WitType> bindingSetsFields = new LinkedHashMap<>();
@@ -108,13 +147,13 @@ public final class WitValueMarshaller {
 
     public static WitValue toWit(final Node node) {
         if (node.isURI()) {
-            return WitVariant.of(VALUE_TYPE, "iri", witString(node.getURI()));
+            return WitVariant.of(TERM_TYPE, "named-node", witString(node.getURI()));
         }
         if (node.isBlank()) {
-            return WitVariant.of(VALUE_TYPE, "bnode", witString(node.getBlankNodeLabel()));
+            return WitVariant.of(TERM_TYPE, "blank-node", witString(node.getBlankNodeLabel()));
         }
         if (node.isLiteral()) {
-            return WitVariant.of(VALUE_TYPE, "literal", literalToWit(node));
+            return WitVariant.of(TERM_TYPE, "literal", literalToWit(node));
         }
         throw new IllegalArgumentException("Unsupported Node kind: " + node);
     }
@@ -123,19 +162,26 @@ public final class WitValueMarshaller {
         final WitType optionStringType = WitType.option(WitType.createString());
         final String lang = node.getLiteralLanguage();
         final String datatype = node.getLiteralDatatypeURI();
+        // datatype is option<iri> in the base WIT: absent means xsd:string
+        // per RDF 1.1 defaulting. Jena carries a datatype on every literal
+        // (rdf:langString for lang-tagged, xsd:string for simple), so
+        // encode it explicitly here rather than reflecting it as None so
+        // round-trips preserve the observed datatype without an implicit
+        // defaulting step across the boundary.
         return WitRecord.builder()
-                .field("label", witString(node.getLiteralLexicalForm()))
-                .field("datatype", witString(datatype != null && !datatype.isEmpty()
-                        ? datatype
-                        : XSDDatatype.XSDstring.getURI()))
-                .field("lang", (lang == null || lang.isEmpty())
+                .field("value", witString(node.getLiteralLexicalForm()))
+                .field("datatype", (WitValue) WitOption.some(optionStringType, witString(
+                        datatype != null && !datatype.isEmpty()
+                                ? datatype
+                                : XSDDatatype.XSDstring.getURI())))
+                .field("language", (lang == null || lang.isEmpty())
                         ? WitOption.none(optionStringType)
-                        : WitOption.some(optionStringType, witString(lang)))
+                        : (WitValue) WitOption.some(optionStringType, witString(lang)))
                 .build();
     }
 
     public static WitList toWitArgs(final Node[] args) {
-        if (args.length == 0) return WitList.empty(VALUE_TYPE);
+        if (args.length == 0) return WitList.empty(TERM_TYPE);
         final List<WitValue> elems = new ArrayList<>(args.length);
         for (Node n : args) elems.add(toWit(n));
         return WitList.of(elems);
@@ -154,36 +200,50 @@ public final class WitValueMarshaller {
     public static Node valueFromWit(final WitValue witValue) {
         final WitVariant variant = (WitVariant) witValue;
         switch (variant.getCaseName()) {
-            case "iri":
+            case "named-node":
                 return NodeFactory.createURI(
                         ((WitString) variant.getPayload()
-                                .orElseThrow(() -> missingPayload("iri"))).getValue());
-            case "bnode":
+                                .orElseThrow(() -> missingPayload("named-node"))).getValue());
+            case "blank-node":
                 return NodeFactory.createBlankNode(
                         ((WitString) variant.getPayload()
-                                .orElseThrow(() -> missingPayload("bnode"))).getValue());
+                                .orElseThrow(() -> missingPayload("blank-node"))).getValue());
             case "literal":
                 return literalFromWit((WitRecord) variant.getPayload()
                         .orElseThrow(() -> missingPayload("literal")));
+            case "triple":
+                // Quoted triples are first-class in the base WIT `term` but
+                // Jena's SPARQL evaluation surface here has no reified path
+                // for a Node_Triple to land in a solution binding through
+                // this marshaller. Reject rather than lossily encode;
+                // downstream call paths should never receive a triple arm
+                // from a well-behaved extension.
+                throw new IllegalArgumentException(
+                        "term variant 'triple' (RDF-star quoted triple) is not supported at the Jena boundary");
             default:
-                throw new IllegalArgumentException("Unknown value case: " + variant.getCaseName());
+                throw new IllegalArgumentException("Unknown term case: " + variant.getCaseName());
         }
     }
 
     private static IllegalArgumentException missingPayload(final String kase) {
-        return new IllegalArgumentException("value variant '" + kase + "' is missing payload");
+        return new IllegalArgumentException("term variant '" + kase + "' is missing payload");
     }
 
+    @SuppressWarnings("unchecked")
     private static Node literalFromWit(final WitRecord record) {
-        final String label = ((WitString) record.getField("label")).getValue();
-        final String datatype = ((WitString) record.getField("datatype")).getValue();
-        final Optional<Object> lang = ((WitOption) record.getField("lang")).toJava();
-        if (lang.isPresent()) {
-            return NodeFactory.createLiteralLang(label, (String) lang.get());
+        final String value = ((WitString) record.getField("value")).getValue();
+        final Optional<Object> datatypeOpt = ((WitOption) record.getField("datatype")).toJava();
+        final Optional<Object> languageOpt = ((WitOption) record.getField("language")).toJava();
+        if (languageOpt.isPresent()) {
+            return NodeFactory.createLiteralLang(value, (String) languageOpt.get());
         }
-        return NodeFactory.createLiteralDT(
-                label,
-                org.apache.jena.datatypes.TypeMapper.getInstance().getSafeTypeByName(datatype));
+        if (datatypeOpt.isPresent()) {
+            return NodeFactory.createLiteralDT(value,
+                    org.apache.jena.datatypes.TypeMapper.getInstance()
+                            .getSafeTypeByName((String) datatypeOpt.get()));
+        }
+        // RDF 1.1: absent datatype + absent language ≡ xsd:string.
+        return NodeFactory.createLiteralDT(value, XSDDatatype.XSDstring);
     }
 
     /**
@@ -242,7 +302,7 @@ public final class WitValueMarshaller {
             final List<Node> byName = new ArrayList<>(java.util.Collections.nCopies(vars.size(), null));
             for (WitValue bindingVal : ((WitList) rowVal).getElements()) {
                 final WitRecord binding = (WitRecord) bindingVal;
-                final String name = ((WitString) binding.getField("name")).getValue();
+                final String name = ((WitString) binding.getField("variable")).getValue();
                 final Node value = valueFromWit(binding.getField("value"));
                 final int idx = vars.indexOf(name);
                 if (idx >= 0) byName.set(idx, value);
