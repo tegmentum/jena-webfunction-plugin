@@ -743,4 +743,139 @@ public final class WitValueMarshaller {
                 Base64.getEncoder().encodeToString(ts.bytes),
                 XSDDatatype.XSDbase64Binary);
     }
+
+    // ---- well-known-exports return marshalling -------------------------------
+    //
+    // Guests exporting `tegmentum:webfunction/search@0.1.0` and
+    // `tegmentum:webfunction/embed@0.1.0` return `list<search-hit>` and
+    // `list<f32>` respectively — shapes outside the substrate's
+    // binding-sets envelope and outside the pre-migration wf_fulltext
+    // `list<hit>` shape that {@link #hitListToRows} decodes.
+    //
+    // The helpers below decode those base-WIT returns into Java shapes
+    // callers can hand back into Jena's SPARQL surface (or use directly
+    // for typed access to the guest's semantics).
+
+    /**
+     * One search-hit as decoded from a
+     * {@code tegmentum:webfunction/search@0.1.0} guest return.
+     *
+     * <p>Fields mirror the WIT {@code search-hit} record:
+     * {@code subject: term} → Jena {@link Node},
+     * {@code score: f64} → double,
+     * {@code snippet: option<string>} → Optional&lt;String&gt;.
+     */
+    public static final class SearchHit {
+        public final Node subject;
+        public final double score;
+        public final Optional<String> snippet;
+
+        public SearchHit(final Node subject, final double score, final Optional<String> snippet) {
+            this.subject = subject;
+            this.score = score;
+            this.snippet = snippet;
+        }
+    }
+
+    /**
+     * Unmarshal a WIT {@code list<search-hit>} return value into a
+     * {@code List<SearchHit>}. Called on the result of a guest exporting
+     * {@code tegmentum:webfunction/search@0.1.0#search}.
+     *
+     * <p>Each hit is a record with fields {@code subject: term},
+     * {@code score: f64}, and {@code snippet: option<string>}. Accepts a
+     * {@link WitFloat32} score as well as {@link WitFloat64} so a guest
+     * that emits f32 (the task memo shape) still decodes cleanly.
+     *
+     * <p>Distinct from {@link #hitListToRows} which decodes the pre-
+     * migration wf_fulltext/wf_document {@code hit} shape (doc, score,
+     * fields, snippet, lang, ...) into binding-sets Rows. The two paths
+     * coexist: hitListToRows handles the pre-migration crate-local shape;
+     * this decoder handles the base-WIT well-known-exports shape.
+     *
+     * @throws IllegalArgumentException if the value shape doesn't match
+     */
+    public static List<SearchHit> unmarshalSearchHits(final WitValue witValue) {
+        if (!(witValue instanceof WitList)) {
+            throw new IllegalArgumentException(
+                "search return is not a list: "
+                + (witValue == null ? "null" : witValue.getClass().getName()));
+        }
+        final List<WitValue> elements = ((WitList) witValue).getElements();
+        final List<SearchHit> hits = new ArrayList<>(elements.size());
+        for (WitValue hitVal : elements) {
+            if (!(hitVal instanceof WitRecord)) {
+                throw new IllegalArgumentException(
+                    "search-hit element is not a record: "
+                    + hitVal.getClass().getName());
+            }
+            final WitRecord hit = (WitRecord) hitVal;
+            final WitValue subjectField = hit.getField("subject");
+            if (subjectField == null) {
+                throw new IllegalArgumentException("search-hit record missing `subject` field");
+            }
+            final Node subject = valueFromWit(subjectField);
+            final double score = readF32OrF64(hit.getField("score"), "search-hit.score");
+            final Optional<String> snippet = readOptionalString(hit.getField("snippet"));
+            hits.add(new SearchHit(subject, score, snippet));
+        }
+        return hits;
+    }
+
+    /**
+     * Unmarshal a WIT {@code list<f32>} return value into a
+     * {@code List<Float>}. Called on the result of a guest exporting
+     * {@code tegmentum:webfunction/embed@0.1.0#embed}. Also accepts
+     * {@link WitFloat64} elements for guests that emit f64 vectors.
+     *
+     * <p>Distinct from {@link #floatListToRows} which projects the same
+     * shape into a single-row binding-sets envelope with a {@code ?node}
+     * hint. The two paths coexist: floatListToRows serves the SPARQL
+     * VALUES-splice path; this decoder returns the vector unprojected.
+     *
+     * @throws IllegalArgumentException if the value shape doesn't match
+     */
+    public static List<Float> unmarshalF32Vector(final WitValue witValue) {
+        if (!(witValue instanceof WitList)) {
+            throw new IllegalArgumentException(
+                "embed return is not a list: "
+                + (witValue == null ? "null" : witValue.getClass().getName()));
+        }
+        final List<WitValue> elements = ((WitList) witValue).getElements();
+        final List<Float> out = new ArrayList<>(elements.size());
+        for (WitValue elem : elements) {
+            if (elem instanceof WitFloat32) {
+                out.add(((WitFloat32) elem).getValue());
+            } else if (elem instanceof WitFloat64) {
+                out.add((float) ((WitFloat64) elem).getValue());
+            } else {
+                throw new IllegalArgumentException(
+                    "embed vector element is not an f32/f64: " + elem.getClass().getName());
+            }
+        }
+        return out;
+    }
+
+    private static double readF32OrF64(final WitValue v, final String context) {
+        if (v == null) throw new IllegalArgumentException(context + " missing");
+        if (v instanceof WitFloat64) return ((WitFloat64) v).getValue();
+        if (v instanceof WitFloat32) return (double) ((WitFloat32) v).getValue();
+        throw new IllegalArgumentException(context + " is not an f32/f64: " + v.getClass().getName());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Optional<String> readOptionalString(final WitValue v) {
+        if (v == null) return Optional.empty();
+        if (!(v instanceof WitOption)) {
+            throw new IllegalArgumentException(
+                "expected option<string> but got " + v.getClass().getName());
+        }
+        final Optional<Object> inner = ((WitOption) v).toJava();
+        if (inner.isEmpty()) return Optional.empty();
+        final Object raw = inner.get();
+        if (raw instanceof String) return Optional.of((String) raw);
+        if (raw instanceof WitString) return Optional.of(((WitString) raw).getValue());
+        throw new IllegalArgumentException(
+            "option<string> payload not a string: " + raw.getClass().getName());
+    }
 }
