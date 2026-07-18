@@ -915,10 +915,17 @@ public final class HostCallbacks {
      * envelope. The debug_execute_update guest follow-up expects a non-empty
      * bindings list on a successful SELECT, which this shape satisfies.
      *
-     * <p>Error surface maps every failure to {@code graph-call-error::backend-error}
-     * for MVP; {@code syntax-error} and {@code not-permitted} discrimination
-     * is a follow-up when we can distinguish parse-time from run-time
-     * failures cleanly.
+     * <p>Error discrimination:
+     * <ul>
+     *   <li>Callback disabled → {@code not-permitted}.</li>
+     *   <li>SPARQL parse failure ({@link org.apache.jena.query.QueryParseException},
+     *       raised by {@link org.apache.jena.query.QueryFactory#create}
+     *       inside {@link CallbackContext#executeSelect}) → {@code syntax-error}.</li>
+     *   <li>{@link SecurityException} → {@code not-permitted}.</li>
+     *   <li>Everything else — including runtime
+     *       {@link org.apache.jena.query.QueryException} subclasses that
+     *       aren't parse errors — → {@code backend-error}.</li>
+     * </ul>
      */
     public static WitHostFunction graphExecuteQuery() {
         return args -> {
@@ -970,10 +977,11 @@ public final class HostCallbacks {
      *  func(sparql: string) -> result<_, graph-call-error>}.
      *
      * <p>Bridges to {@link CallbackContext#executeUpdate} — the same
-     * executor that backs the legacy v0.5 {@link #executeUpdateV05}. Error
-     * surface maps to {@code graph-call-error::backend-error} for MVP (see
-     * the sibling {@link #graphExecuteQuery} javadoc for the follow-up
-     * discrimination note).
+     * executor that backs the legacy v0.5 {@link #executeUpdateV05}. Same
+     * error discrimination as {@link #graphExecuteQuery}: SPARQL parse
+     * failures (org.apache.jena.query.QueryParseException) map to
+     * {@code syntax-error}, {@link SecurityException} to
+     * {@code not-permitted}, everything else to {@code backend-error}.
      */
     public static WitHostFunction graphExecuteUpdate() {
         return args -> {
@@ -998,11 +1006,38 @@ public final class HostCallbacks {
                     ctx.exit();
                 }
             } catch (RuntimeException e) {
-                return new Object[] { ComponentVal.err(
-                    graphCallError("backend-error",
-                        e.getMessage() == null ? e.toString() : e.getMessage())) };
+                return new Object[] { ComponentVal.err(discriminateGraphError(e)) };
             }
         };
+    }
+
+    /**
+     * Map a caught {@link RuntimeException} to the appropriate
+     * {@code graph-call-error} variant. Parse-time exceptions
+     * ({@link org.apache.jena.query.QueryParseException}) map to
+     * {@code syntax-error}; security failures map to {@code not-permitted};
+     * every other runtime failure lands on {@code backend-error} (the
+     * preserved MVP default). Walks up to eight hops of the cause chain
+     * so a QueryParseException wrapped in an outer QueryException still
+     * surfaces as syntax-error.
+     */
+    private static ComponentVal discriminateGraphError(final RuntimeException e) {
+        final String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+        Throwable cur = e;
+        int hops = 0;
+        while (cur != null && hops < 8) {
+            if (cur instanceof org.apache.jena.query.QueryParseException) {
+                final String parseMsg = cur.getMessage() == null ? cur.toString() : cur.getMessage();
+                return graphCallError("syntax-error", parseMsg);
+            }
+            if (cur instanceof SecurityException) {
+                final String secMsg = cur.getMessage() == null ? cur.toString() : cur.getMessage();
+                return graphCallError("not-permitted", secMsg);
+            }
+            cur = cur.getCause();
+            hops++;
+        }
+        return graphCallError("backend-error", msg);
     }
 
     /** Build a {@code graph-call-error} variant value with the given arm and message. */
