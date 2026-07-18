@@ -28,7 +28,7 @@ public class TestCallbackDepth {
 
     private static final String WASM = System.getProperty("wf.debug.callback.depth.wasm",
             System.getProperty("user.home")
-                    + "/git/tegmentum-webfunctions/target/wasm32-wasip1/release/debug_callback_depth.wasm");
+                    + "/git/webfunctions/target/wasm32-wasip1/release/debug_callback_depth.wasm");
 
     @BeforeClass
     public static void registerFunctions() {

@@ -35,7 +35,7 @@ public class TestWfTreeE2E {
 
     private static final String WF_TREE_WASM = System.getProperty("wf.tree.wasm",
             System.getProperty("user.home")
-                    + "/git/tegmentum-webfunctions/target/wasm32-wasip1/release/wf_tree.wasm");
+                    + "/git/webfunctions/target/wasm32-wasip1/release/wf_tree.wasm");
 
     @BeforeClass
     public static void registerFunctions() {
@@ -47,7 +47,7 @@ public class TestWfTreeE2E {
         final File wasm = new File(WF_TREE_WASM);
         assumeTrue("wf_tree.wasm not built at " + wasm.getAbsolutePath()
                 + " (build via `cargo component build --release` in "
-                + "tegmentum-webfunctions/crates/wf_tree)",
+                + "webfunctions/crates/wf_tree)",
                 wasm.exists());
 
         final Model model = ModelFactory.createDefaultModel();

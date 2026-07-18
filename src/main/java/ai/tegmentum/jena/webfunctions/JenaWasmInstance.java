@@ -280,7 +280,7 @@ public final class JenaWasmInstance implements Closeable {
         // The wf_sagegraph_nn guest imports this in its text-attributed
         // feature mode (memo §06); guests that don't opt into text mode
         // never touch it, so this registration is additive. WIT lives at
-        // ~/git/tegmentum-webfunctions/crates/wf_embed/wit/wf-embed.wit.
+        // ~/git/webfunctions/crates/wf_embed/wit/wf-embed.wit.
         // v0.1 implementation is a deterministic SHA-256-derived stub
         // that mirrors the Rust-side earlier stub landing (oxigraph-wf
         // d07c2d6 / qlever-wf-runtime register_wf_embed_host_import

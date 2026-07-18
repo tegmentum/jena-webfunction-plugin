@@ -37,7 +37,7 @@ public class TestExecuteUpdate {
 
     private static final String WASM = System.getProperty("wf.debug.execute.update.wasm",
             System.getProperty("user.home")
-                    + "/git/tegmentum-webfunctions/target/wasm32-wasip1/release/debug_execute_update.wasm");
+                    + "/git/webfunctions/target/wasm32-wasip1/release/debug_execute_update.wasm");
 
     private static final String S = "http://example.org/subj";
     private static final String P = "http://example.org/pred";

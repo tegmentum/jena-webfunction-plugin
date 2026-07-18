@@ -41,7 +41,7 @@ public class TestEntryPointResolution {
     private static final String WF_FULLTEXT_WASM =
             System.getProperty("wf.fulltext.wasm",
                     System.getProperty("user.home")
-                            + "/git/tegmentum-webfunctions/target/wasm32-wasip1/release/wf_fulltext.wasm");
+                            + "/git/webfunctions/target/wasm32-wasip1/release/wf_fulltext.wasm");
 
     @BeforeClass
     public static void registerFunctions() {
