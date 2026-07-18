@@ -35,10 +35,30 @@ import java.util.Optional;
 import java.util.TreeSet;
 
 /**
- * Marshalling between Jena {@link Node} and the WIT value model declared in
- * {@code src/main/wit/webfunction.wit}. The WIT world is provider-neutral (the
- * package name is {@code stardog:webfunction@0.2.0} for historical reasons —
- * components compiled against it run on both the Stardog and Jena bindings).
+ * Marshalling between Jena {@link Node} and the WIT value model.
+ *
+ * <p>The base value model (variant/literal/binding shapes) lives in the
+ * tegmentum:webfunction package at src/main/wit/base/types.wit; the
+ * Stardog-only accuracy enum and cardinality record live in the
+ * stardog:webfunction@0.3.0 overlay at src/main/wit/overlay/planner.wit.
+ * The WitType instances below still mirror the pre-split
+ * stardog:webfunction@0.2.0 shape verbatim — value is still a 3-arm
+ * variant (iri/literal/bnode), literal fields are still label/datatype/
+ * lang, binding fields are still name/value. The overlay adopts the
+ * base's renamed fields at the WIT layer; the Java-side marshalling
+ * intentionally stays on the old shape in this commit and is
+ * regenerated in the follow-up commit that lands the new type
+ * descriptors alongside the migrated stardog test crates.
+ *
+ * <p>The plugin has no in-repo test wasm crates — it reuses the
+ * component-mode crates from the sibling stardog-webfunction-plugin
+ * (to_upper_component / multi_var_component / sum_component), which
+ * were migrated onto tegmentum:webfunction/types@0.1.0 shapes as part
+ * of the Agent A landing in that repo. HostCallbacks.java still
+ * constructs ComponentVal bindings using the pre-split field names
+ * (name/label/lang, iri/bnode arms); alignment with the base's
+ * host-callbacks interface is part of the full sparql-extension
+ * migration follow-up.
  */
 public final class WitValueMarshaller {
 
