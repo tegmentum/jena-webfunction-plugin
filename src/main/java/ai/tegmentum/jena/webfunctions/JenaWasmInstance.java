@@ -9,7 +9,11 @@ import ai.tegmentum.webassembly4j.api.ComponentInstance;
 import ai.tegmentum.webassembly4j.api.DefaultLinkingContext;
 import ai.tegmentum.webassembly4j.api.Engine;
 import ai.tegmentum.webassembly4j.api.WasiNnConfig;
+import ai.tegmentum.webassembly4j.api.WitCallableResource;
 import ai.tegmentum.webassembly4j.api.config.ComponentConfig;
+import ai.tegmentum.webassembly4j.provider.wasmtime.BridgingSparqlExtensionDispatch;
+import ai.tegmentum.wasmtime4j.wit.WitList;
+import ai.tegmentum.wasmtime4j.wit.WitRecord;
 import ai.tegmentum.wasmtime4j.wit.WitResult;
 import ai.tegmentum.wasmtime4j.wit.WitString;
 import ai.tegmentum.wasmtime4j.wit.WitU64;
@@ -75,6 +79,26 @@ public final class JenaWasmInstance implements Closeable {
     private final URL wasmUrl;
     private ComponentInstance instance;
     private boolean closed;
+
+    // Bridging dispatch: one helper per instance, capability-detected once
+    // at first use. Serves both the new sparql-extension world
+    // (tegmentum:webfunction@0.1.0) and the flat pre-migration ABI
+    // (bare `evaluate`, `aggregate-step`, `aggregate-finish`) so guests
+    // migrate crate-by-crate without a plugin-side flag day. See
+    // BridgingSparqlExtensionDispatch's class Javadoc.
+    private volatile BridgingSparqlExtensionDispatch bridge;
+    // Cached sparql-extension function names discovered via
+    // `extension.register()` / `aggregate.register-aggregates()` on the
+    // first new-shape dispatch. Old-shape guests get a placeholder that
+    // the bridging discards (bare `evaluate` / `aggregate-*` have no
+    // name parameter).
+    private volatile String cachedFilterFunctionName;
+    private volatile String cachedAggregateName;
+    // Per-group aggregate resource handle for new-shape guests. Old-shape
+    // guests store accumulator state on the instance itself; the shim
+    // resource returned by bridging.newAggregate for those is a no-op
+    // handle whose close() is idempotent.
+    private WitCallableResource aggregateResource;
 
     public JenaWasmInstance(final URL wasmUrl) throws IOException {
         this.wasmUrl = wasmUrl;
@@ -447,9 +471,126 @@ public final class JenaWasmInstance implements Closeable {
         // opts: query-opts)` need N typed positional values coerced from
         // the callsite Node[] per the introspected signature.
         final Object[] callArgs = marshalTypedArgs(entry, args);
+        // Standard sparql-extension dispatch (entry resolved to bare
+        // `evaluate` under the legacy well-known-entry-points fallback)
+        // routes through the bridging helper so we serve both the new
+        // sparql-extension world (tegmentum:webfunction/extension@0.1.0
+        // #call) and old-shape guests from one call site. Custom entry
+        // points (wf_fulltext's `search`, etc.) live outside that
+        // contract and stay on direct invocation.
+        if ("evaluate".equals(entry)
+                && callArgs.length == 1
+                && callArgs[0] instanceof WitList) {
+            return evaluateViaBridging((WitList) callArgs[0], inputNodeIri);
+        }
         final WitValue result = (WitValue) instance.invokeWit(entry, callArgs);
         final WitValue ok = unwrapOk(result);
         return WitValueMarshaller.bindingSetsFromWit(ok, inputNodeIri);
+    }
+
+    /**
+     * Dispatch the standard packed-{@code list<term>} filter call through
+     * {@link BridgingSparqlExtensionDispatch}. New-shape guests reach
+     * {@code extension.call(name, args)} and return a single {@code term}
+     * that we wrap as a 1-row 1-var binding-set under the substrate's
+     * conventional {@code value_0} name. Old-shape guests reach bare
+     * {@code evaluate(args)} and return {@code list<binding-set>}, which
+     * the marshaller decodes as before.
+     */
+    private List<WitValueMarshaller.Row> evaluateViaBridging(final WitList argList,
+                                                             final String inputNodeIri) throws IOException {
+        final BridgingSparqlExtensionDispatch b = bridge();
+        final List<WitValue> elements = argList.getElements();
+        if (elements.isEmpty()) {
+            // Zero-arg evaluate — bridging.callFilter rejects empty arg
+            // lists at the surface (varargs cannot infer element type
+            // from an empty list). Every zero-arg call is against an
+            // old-shape guest by construction (new-shape filters take
+            // at least one term), so dispatch directly to the bare
+            // `evaluate` export the helper would have chosen anyway.
+            // Bare `evaluate` — the old-shape filter export the bridging
+            // would route to; inlined here because the constant is
+            // package-private to the bridging helper.
+            final WitValue result = (WitValue) instance.invokeWit("evaluate", argList);
+            final WitValue ok = unwrapOk(result);
+            return WitValueMarshaller.bindingSetsFromWit(ok, inputNodeIri);
+        }
+        final WitValue result = b.callFilter(filterFunctionName(b), elements);
+        final WitValue ok = unwrapOk(result);
+        if (b.filterIsNewShape()) {
+            // New-shape returns a single term; wrap as one-row one-var
+            // binding-set under the conventional `value_0` binding name
+            // so downstream callers see the same Row shape as the old
+            // multi-row `binding-sets` path.
+            final Node value = WitValueMarshaller.valueFromWit(ok);
+            return java.util.Collections.singletonList(
+                    new WitValueMarshaller.Row(
+                            java.util.Collections.singletonList("value_0"),
+                            java.util.Collections.singletonList(value)));
+        }
+        return WitValueMarshaller.bindingSetsFromWit(ok, inputNodeIri);
+    }
+
+    /**
+     * Lazily construct the {@link BridgingSparqlExtensionDispatch} for
+     * this instance's underlying {@link ComponentInstance}. Capability
+     * detection runs at construction; subsequent calls read the cached
+     * shape flags.
+     */
+    private BridgingSparqlExtensionDispatch bridge() {
+        BridgingSparqlExtensionDispatch b = bridge;
+        if (b != null) return b;
+        synchronized (this) {
+            if (bridge == null) {
+                bridge = new BridgingSparqlExtensionDispatch(instance);
+            }
+            return bridge;
+        }
+    }
+
+    /**
+     * Resolve the sparql-extension function name to pass through
+     * {@link BridgingSparqlExtensionDispatch#callFilter(String, List)}.
+     * New-shape guests are asked once via {@code extension.register()}
+     * and the first descriptor's name is cached; old-shape guests get
+     * a placeholder that the bridging discards on the way to bare
+     * {@code evaluate}.
+     */
+    private String filterFunctionName(final BridgingSparqlExtensionDispatch b) throws IOException {
+        String name = cachedFilterFunctionName;
+        if (name != null) return name;
+        synchronized (this) {
+            if (cachedFilterFunctionName != null) return cachedFilterFunctionName;
+            if (b.filterIsNewShape()) {
+                cachedFilterFunctionName = firstRegisteredName(
+                        "tegmentum:webfunction/extension@0.1.0#register",
+                        "extension.register returned no descriptors");
+            } else {
+                cachedFilterFunctionName = "evaluate";
+            }
+            return cachedFilterFunctionName;
+        }
+    }
+
+    /**
+     * Enumerate a new-shape guest's registered names via the given
+     * {@code register-*} export and return the first descriptor's
+     * {@code name} field. Used for filter and aggregate name discovery.
+     */
+    private String firstRegisteredName(final String registerExport,
+                                       final String emptyMessage) throws IOException {
+        final Object rawDescriptors = instance.invokeWit(registerExport);
+        if (!(rawDescriptors instanceof WitList)) {
+            throw new IOException(registerExport + " returned non-list: "
+                    + (rawDescriptors == null ? "null" : rawDescriptors.getClass().getName()));
+        }
+        final List<WitValue> elems = ((WitList) rawDescriptors).getElements();
+        if (elems.isEmpty()) throw new IOException(emptyMessage);
+        if (!(elems.get(0) instanceof WitRecord)) {
+            throw new IOException(registerExport + " first descriptor is not a record: "
+                    + elems.get(0).getClass().getName());
+        }
+        return ((WitString) ((WitRecord) elems.get(0)).getField("name")).getValue();
     }
 
     /**
@@ -1118,9 +1259,33 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     /**
-     * Feed one row into the aggregate accumulator.
+     * Feed one row into the aggregate accumulator. Dispatch is via the
+     * bridging aggregate lifecycle so new-shape guests reach
+     * {@code aggregate.new-aggregate} + resource {@code step}, and
+     * old-shape guests reach the flat {@code aggregate-step(args, mult)}
+     * export through the bridging shim. The shim discards the
+     * multiplicity arg, so we replay the call {@code multiplicity} times
+     * to preserve N-copies-of-a-row semantics under both shapes; new-shape
+     * guests receive N step invocations, matching the aggregate contract.
      */
     public void aggregateStep(final Node[] args, final long multiplicity) throws IOException {
+        final BridgingSparqlExtensionDispatch b = bridge();
+        if (b.aggregateIsNewShape()) {
+            if (aggregateResource == null) {
+                aggregateResource = b.newAggregate(aggregateFunctionName(b));
+            }
+            final WitList argList = WitValueMarshaller.toWitArgs(args);
+            for (long i = 0; i < multiplicity; i++) {
+                // The bridging shim recognises the neutral "step" method
+                // name; new-shape resources dispatch to their
+                // `aggregate-state.step` method under the same name.
+                final Object stepReturn = aggregateResource.invokeMethodWit("step", argList);
+                unwrapOk((WitValue) stepReturn);
+            }
+            return;
+        }
+        // Old-shape path: direct dispatch preserves the multiplicity arg
+        // that the bridging shim would otherwise discard.
         final WitValue result = (WitValue) instance.invokeWit(
                 "aggregate-step",
                 WitValueMarshaller.toWitArgs(args),
@@ -1129,11 +1294,56 @@ public final class JenaWasmInstance implements Closeable {
     }
 
     /**
-     * Finalise the aggregation and return the accumulated binding-sets.
+     * Finalise the aggregation. New-shape guests return a single
+     * {@code term} through the resource's {@code finish} method, wrapped
+     * here as a 1-row 1-var binding-set under the conventional
+     * {@code value_0} name. Old-shape guests return {@code binding-sets}
+     * from bare {@code aggregate-finish}; kept on direct dispatch since
+     * the bridging shim's finish path returns {@code Object} rather than
+     * {@code WitValue} on the module-mode contract.
      */
     public List<WitValueMarshaller.Row> aggregateFinish() throws IOException {
+        final BridgingSparqlExtensionDispatch b = bridge();
+        if (b.aggregateIsNewShape()) {
+            if (aggregateResource == null) {
+                // No step ever ran — return empty, matching the flat-world
+                // no-input semantic that emits no rows.
+                return java.util.Collections.emptyList();
+            }
+            try {
+                // Neutral "finish" method name — recognised by both the
+                // new-shape resource and the bridging shim.
+                final Object finishReturn = aggregateResource.invokeMethodWit("finish");
+                final WitValue ok = unwrapOk((WitValue) finishReturn);
+                final Node value = WitValueMarshaller.valueFromWit(ok);
+                return java.util.Collections.singletonList(
+                        new WitValueMarshaller.Row(
+                                java.util.Collections.singletonList("value_0"),
+                                java.util.Collections.singletonList(value)));
+            } finally {
+                aggregateResource.close();
+                aggregateResource = null;
+            }
+        }
         final WitValue result = (WitValue) instance.invokeWit("aggregate-finish");
         return WitValueMarshaller.bindingSetsFromWit(unwrapOk(result));
+    }
+
+    /**
+     * Resolve the sparql-extension aggregate name for new-shape guests.
+     * Discovered once via {@code aggregate.register-aggregates()} and
+     * cached; every subsequent {@code newAggregate} call reuses it.
+     */
+    private String aggregateFunctionName(final BridgingSparqlExtensionDispatch b) throws IOException {
+        String name = cachedAggregateName;
+        if (name != null) return name;
+        synchronized (this) {
+            if (cachedAggregateName != null) return cachedAggregateName;
+            cachedAggregateName = firstRegisteredName(
+                    "tegmentum:webfunction/aggregate@0.1.0#register-aggregates",
+                    "aggregate.register-aggregates returned no descriptors");
+            return cachedAggregateName;
+        }
     }
 
     /**
@@ -1228,6 +1438,17 @@ public final class JenaWasmInstance implements Closeable {
     public void close() {
         // Instance is per-call — release only that. Engine + Component stay
         // cached for reuse across subsequent calls.
+        if (aggregateResource != null) {
+            try {
+                aggregateResource.close();
+            } catch (RuntimeException ignore) {
+                // Best-effort — the shim's close is a no-op and native
+                // resource closes should not mask a downstream caller's
+                // error path.
+            }
+            aggregateResource = null;
+        }
+        bridge = null;
         instance = null;
         closed = true;
     }
