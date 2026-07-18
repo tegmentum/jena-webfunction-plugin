@@ -895,6 +895,163 @@ public final class HostCallbacks {
         return out;
     }
 
+    /**
+     * New-shape {@code tegmentum:webfunction/graph-callbacks@0.1.0#execute-query:
+     *  func(sparql: string) -> result<query-result, graph-call-error>}.
+     *
+     * <p>Bridges the base {@code tegmentum:webfunction} substrate WIT onto
+     * the existing {@link CallbackContext#executeSelect} executor. Distinct
+     * from {@link #executeQuery} — which speaks the legacy Stardog
+     * {@code stardog:webfunction/host} shape (three args, {@code binding-sets}
+     * record return) — this one accepts a single query string and returns
+     * the base {@code query-result} variant (bindings / quads / boolean arms).
+     *
+     * <p>MVP: unifies onto the {@code bindings} arm. SPARQL SELECT / CONSTRUCT /
+     * DESCRIBE / ASK all reach through {@code executeSelect}, which flattens
+     * CONSTRUCT/DESCRIBE onto SPO rows and ASK onto a single-row
+     * {@code _ask} binding. The base WIT's separate {@code quads} and
+     * {@code boolean} arms are a follow-up shape refinement — guests reading
+     * the {@code bindings} arm see the same data through a different
+     * envelope. The debug_execute_update guest follow-up expects a non-empty
+     * bindings list on a successful SELECT, which this shape satisfies.
+     *
+     * <p>Error surface maps every failure to {@code graph-call-error::backend-error}
+     * for MVP; {@code syntax-error} and {@code not-permitted} discrimination
+     * is a follow-up when we can distinguish parse-time from run-time
+     * failures cleanly.
+     */
+    public static WitHostFunction graphExecuteQuery() {
+        return args -> {
+            if (!WebFunctionConfig.callbackEnabled()) {
+                return new Object[] { ComponentVal.err(
+                    graphCallError("not-permitted",
+                        "wf callback disabled by webfunctions.callback.enabled=false")) };
+            }
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(
+                    graphCallError("backend-error",
+                        "wf callback: no context bound")) };
+            }
+            try {
+                final String sparql = ((ComponentVal) args[0]).asString();
+                ctx.enter();
+                try {
+                    final ResultSet rs = ctx.executeSelect(sparql, new QuerySolutionMap());
+                    final List<ComponentVal> bindings = new ArrayList<>();
+                    final List<String> vars = rs.getResultVars();
+                    while (rs.hasNext()) {
+                        final org.apache.jena.query.QuerySolution qs = rs.next();
+                        for (String var : vars) {
+                            final RDFNode node = qs.get(var);
+                            if (node == null) continue;
+                            final Map<String, ComponentVal> bindingFields = new LinkedHashMap<>();
+                            bindingFields.put("variable", ComponentVal.string(var));
+                            bindingFields.put("value", encodeTermV1(node.asNode()));
+                            bindings.add(ComponentVal.record(bindingFields));
+                        }
+                    }
+                    final ComponentVal queryResult = ComponentVal.variant(
+                        "bindings", ComponentVal.list(bindings));
+                    return new Object[] { ComponentVal.ok(queryResult) };
+                } finally {
+                    ctx.exit();
+                }
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(
+                    graphCallError("backend-error",
+                        e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
+    /**
+     * New-shape {@code tegmentum:webfunction/graph-callbacks@0.1.0#execute-update:
+     *  func(sparql: string) -> result<_, graph-call-error>}.
+     *
+     * <p>Bridges to {@link CallbackContext#executeUpdate} — the same
+     * executor that backs the legacy v0.5 {@link #executeUpdateV05}. Error
+     * surface maps to {@code graph-call-error::backend-error} for MVP (see
+     * the sibling {@link #graphExecuteQuery} javadoc for the follow-up
+     * discrimination note).
+     */
+    public static WitHostFunction graphExecuteUpdate() {
+        return args -> {
+            if (!WebFunctionConfig.callbackEnabled()) {
+                return new Object[] { ComponentVal.err(
+                    graphCallError("not-permitted",
+                        "wf callback disabled by webfunctions.callback.enabled=false")) };
+            }
+            final CallbackContext ctx = CallbackContext.current();
+            if (ctx == null) {
+                return new Object[] { ComponentVal.err(
+                    graphCallError("backend-error",
+                        "wf callback: no context bound")) };
+            }
+            try {
+                final String sparql = ((ComponentVal) args[0]).asString();
+                ctx.enter();
+                try {
+                    ctx.executeUpdate(sparql, new QuerySolutionMap());
+                    return new Object[] { ComponentVal.ok(null) };
+                } finally {
+                    ctx.exit();
+                }
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(
+                    graphCallError("backend-error",
+                        e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
+    /** Build a {@code graph-call-error} variant value with the given arm and message. */
+    private static ComponentVal graphCallError(final String armName, final String message) {
+        return ComponentVal.variant(armName, ComponentVal.string(message));
+    }
+
+    /**
+     * Encode a Jena {@link Node} as the base {@code tegmentum:webfunction/types.term}
+     * variant (4 arms: named-node / blank-node / literal / triple). Distinct
+     * from the legacy {@link #encodeNode} — which produces the 3-arm
+     * {@code stardog:webfunction/host} {@code value} variant with the legacy
+     * literal record shape ({@code label} / {@code datatype: string} /
+     * {@code lang}).
+     *
+     * <p>Base literal record uses {@code value: string}, {@code datatype:
+     * option<iri>} (absent means xsd:string), and {@code language:
+     * option<string>}. RDF-star quoted triples raise — the executor path
+     * does not surface them today.
+     */
+    private static ComponentVal encodeTermV1(final Node n) {
+        if (n.isURI()) {
+            return ComponentVal.variant("named-node", ComponentVal.string(n.getURI()));
+        }
+        if (n.isBlank()) {
+            return ComponentVal.variant("blank-node", ComponentVal.string(n.getBlankNodeLabel()));
+        }
+        if (n.isLiteral()) {
+            final String label = n.getLiteralLexicalForm();
+            final String datatypeUri = n.getLiteralDatatypeURI();
+            final String lang = n.getLiteralLanguage();
+            final Map<String, ComponentVal> fields = new LinkedHashMap<>();
+            fields.put("value", ComponentVal.string(label));
+            // datatype: option<iri>. absent = xsd:string per RDF 1.1 default.
+            if (datatypeUri == null || datatypeUri.isEmpty()
+                    || XSD_STRING.equals(datatypeUri)) {
+                fields.put("datatype", ComponentVal.none());
+            } else {
+                fields.put("datatype", ComponentVal.some(ComponentVal.string(datatypeUri)));
+            }
+            fields.put("language", (lang != null && !lang.isEmpty())
+                    ? ComponentVal.some(ComponentVal.string(lang))
+                    : ComponentVal.none());
+            return ComponentVal.variant("literal", ComponentVal.record(fields));
+        }
+        throw new IllegalArgumentException(
+            "wf graph-callbacks: unsupported Node kind for base-WIT term: " + n);
+    }
+
     /** {@code execute-update: func(sparql: string, bindings: list<binding>)
      *  -> result<_, string>}  (v0.3.1). */
     public static WitHostFunction executeUpdate() {
