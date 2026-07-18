@@ -74,12 +74,15 @@ public class TestEntryPointResolution {
     }
 
     /**
-     * wf:fulltext exports {@code search, insert-batch, delete-batch}.
-     * {@code search} is a well-known primary export
-     * ({@link JenaWasmInstance#WELL_KNOWN_ENTRY_POINTS}), so the
-     * step-3 heuristic picks it over the admin/mutation exports.
-     * Closes the multi-export ambiguity that blocked
-     * fulltext_document_corpus.
+     * Post-well-known-exports-migration, wf_fulltext exports
+     * {@code tegmentum:webfunction/search@0.1.0} (the named-interface
+     * search surface) alongside its {@code insert-batch} /
+     * {@code delete-batch} bare admin exports. The resolver's
+     * WELL_KNOWN_INTERFACES probe wins over the pure-static bare-name
+     * heuristic, so we get the qualified interface#function form.
+     * Pre-migration wf_fulltext (which exported bare {@code search})
+     * would resolve to the bare name via the static resolver's step 3;
+     * this test covers the post-migration path.
      */
     @Test
     public void resolvesSearchOnWfFulltext() throws Exception {
@@ -88,7 +91,8 @@ public class TestEntryPointResolution {
         final URL url = wasm.toURI().toURL();
 
         try (JenaWasmInstance instance = new JenaWasmInstance(url)) {
-            assertThat(instance.resolveEntryPoint(null)).isEqualTo("search");
+            assertThat(instance.resolveEntryPoint(null))
+                    .isEqualTo("tegmentum:webfunction/search@0.1.0#search");
         }
     }
 
