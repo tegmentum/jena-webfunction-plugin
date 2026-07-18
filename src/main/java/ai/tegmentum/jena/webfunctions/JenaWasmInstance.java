@@ -279,15 +279,6 @@ public final class JenaWasmInstance implements Closeable {
             // as the legacy stardog:webfunction/host family — the flag
             // controls re-entry into the graph regardless of which WIT
             // shape the guest speaks.
-            //
-            // http-callbacks / wasm-callbacks are deliberately NOT
-            // registered here: their shapes diverge substantially from
-            // the existing wf:fulltext/wf:document http-post-json and
-            // stardog:webfunction/host invoke-wasm impls, and no
-            // observed guest imports them yet. Adding them under
-            // mismatched signatures would trap at instantiate time for
-            // any guest that IS importing them, so we defer the wiring
-            // until a guest lands that needs them (memo: deferred).
             linker.addWitHostFunction(
                 "tegmentum:webfunction/graph-callbacks@0.1.0#execute-query",
                 HostCallbacks.graphExecuteQuery());
@@ -295,6 +286,37 @@ public final class JenaWasmInstance implements Closeable {
                 "tegmentum:webfunction/graph-callbacks@0.1.0#execute-update",
                 HostCallbacks.graphExecuteUpdate());
         }
+        // tegmentum:webfunction/http-callbacks@0.1.0 —
+        // outbound HTTP for guests targeting `world
+        // extension-with-host-callbacks`. Distinct signature from the
+        // legacy wf:fulltext/wf:document/wf:sagegraph http-post-json:
+        // takes a headers list, returns a typed http-response record
+        // (status, headers, body) with a four-arm http-error variant
+        // (network, status(u16), invalid-request, not-permitted). Impl
+        // uses JDK-native java.net.http.HttpClient. Registered outside
+        // the callback-enabled gate because the flag controls
+        // re-entering the graph, this reaches external services.
+        linker.addWitHostFunction(
+            "tegmentum:webfunction/http-callbacks@0.1.0#http-get",
+            HostCallbacks.httpGetV1());
+        linker.addWitHostFunction(
+            "tegmentum:webfunction/http-callbacks@0.1.0#http-post-json",
+            HostCallbacks.httpPostJsonV1());
+        // tegmentum:webfunction/wasm-callbacks@0.1.0 —
+        // sub-component dispatch. MVP registers both invoke-wasm
+        // (scalar-return `term`) and invoke-wasm-service
+        // (list<binding>-return, property-function shape) as
+        // not-permitted stubs so guests importing the interface can
+        // link. Full JVM-host component composition is separate future
+        // work; a guest that reaches these callbacks receives a typed
+        // policy denial with a descriptive message instead of a
+        // link-time trap.
+        linker.addWitHostFunction(
+            "tegmentum:webfunction/wasm-callbacks@0.1.0#invoke-wasm",
+            HostCallbacks.invokeWasmV1());
+        linker.addWitHostFunction(
+            "tegmentum:webfunction/wasm-callbacks@0.1.0#invoke-wasm-service",
+            HostCallbacks.invokeWasmService());
         // wf:fulltext/host@0.1.0 — one import, `http-post-json`. The
         // wf_fulltext guest declares its own WIT world (versioned under
         // wf:fulltext, not stardog:webfunction), so this binds independently

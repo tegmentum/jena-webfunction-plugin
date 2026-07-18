@@ -1010,6 +1010,175 @@ public final class HostCallbacks {
         return ComponentVal.variant(armName, ComponentVal.string(message));
     }
 
+    // ---- tegmentum:webfunction/http-callbacks@0.1.0 -------------------------
+
+    /**
+     * Base-substrate {@code tegmentum:webfunction/http-callbacks@0.1.0#http-get:
+     *  func(url: string, headers: list<http-header>) -> result<http-response, http-error>}.
+     *
+     * <p>Distinct from the legacy {@link #httpPostJson} (wf:fulltext /
+     * wf:document / wf:sagegraph shape which returns {@code result<string,
+     * string>}). Uses JDK-native {@link java.net.http.HttpClient}. Response
+     * headers come back in the casing HttpClient returns; RFC 7230 §3.2
+     * canonicalises Http/1.1 headers to lowercase.
+     *
+     * <p>Error surface:
+     * <ul>
+     *   <li>Malformed URL / invalid header shape → {@code invalid-request}.</li>
+     *   <li>Non-2xx response → {@code status(u16)} (naked status code).</li>
+     *   <li>IOException / transport failure / interrupt → {@code network}.</li>
+     * </ul>
+     * A 2xx response returns {@code Ok(http-response)}.
+     */
+    public static WitHostFunction httpGetV1() {
+        return args -> {
+            try {
+                final String url = ((ComponentVal) args[0]).asString();
+                final List<ComponentVal> headers = ((ComponentVal) args[1]).asList();
+                return new Object[] { httpSendV1("GET", url, headers, null) };
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(httpErrorV1("invalid-request",
+                    e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
+    /**
+     * Base-substrate {@code tegmentum:webfunction/http-callbacks@0.1.0#http-post-json:
+     *  func(url: string, body: string, headers: list<http-header>)
+     *   -> result<http-response, http-error>}.
+     *
+     * <p>Adds a default {@code Content-Type: application/json} header when
+     * the caller does not supply one. Same error surface as
+     * {@link #httpGetV1}. Distinct method name from the legacy
+     * {@link #httpPostJson} which returns {@code result<string, string>}.
+     */
+    public static WitHostFunction httpPostJsonV1() {
+        return args -> {
+            try {
+                final String url = ((ComponentVal) args[0]).asString();
+                final String body = ((ComponentVal) args[1]).asString();
+                final List<ComponentVal> headers = ((ComponentVal) args[2]).asList();
+                return new Object[] { httpSendV1("POST", url, headers, body) };
+            } catch (RuntimeException e) {
+                return new Object[] { ComponentVal.err(httpErrorV1("invalid-request",
+                    e.getMessage() == null ? e.toString() : e.getMessage())) };
+            }
+        };
+    }
+
+    private static ComponentVal httpSendV1(
+            final String method,
+            final String url,
+            final List<ComponentVal> headerRecords,
+            final String bodyOrNull) {
+        final java.net.URI uri;
+        try {
+            uri = java.net.URI.create(url);
+        } catch (IllegalArgumentException iae) {
+            return ComponentVal.err(httpErrorV1("invalid-request",
+                "url did not parse: " + iae.getMessage()));
+        }
+        final java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(30))
+                .build();
+        final java.net.http.HttpRequest.Builder builder = java.net.http.HttpRequest.newBuilder(uri)
+                .timeout(java.time.Duration.ofSeconds(30));
+
+        boolean sawContentType = false;
+        for (ComponentVal header : headerRecords) {
+            final Map<String, ComponentVal> fields = header.asRecord();
+            final String name = fields.get("name").asString();
+            final String value = fields.get("value").asString();
+            try {
+                builder.header(name, value);
+            } catch (IllegalArgumentException iae) {
+                return ComponentVal.err(httpErrorV1("invalid-request",
+                    "header rejected: " + iae.getMessage()));
+            }
+            if ("content-type".equalsIgnoreCase(name)) sawContentType = true;
+        }
+        if ("POST".equals(method)) {
+            if (!sawContentType) {
+                builder.header("Content-Type", "application/json");
+            }
+            builder.POST(java.net.http.HttpRequest.BodyPublishers.ofString(
+                bodyOrNull == null ? "" : bodyOrNull,
+                java.nio.charset.StandardCharsets.UTF_8));
+        } else {
+            builder.GET();
+        }
+        try {
+            final java.net.http.HttpResponse<String> response = client.send(
+                builder.build(),
+                java.net.http.HttpResponse.BodyHandlers.ofString(java.nio.charset.StandardCharsets.UTF_8));
+            final int status = response.statusCode();
+            if (status < 200 || status >= 300) {
+                return ComponentVal.err(ComponentVal.variant("status", ComponentVal.u16(status)));
+            }
+            final List<ComponentVal> respHeaders = new ArrayList<>();
+            response.headers().map().forEach((k, vs) -> {
+                for (String v : vs) {
+                    final Map<String, ComponentVal> hf = new LinkedHashMap<>();
+                    hf.put("name", ComponentVal.string(k));
+                    hf.put("value", ComponentVal.string(v));
+                    respHeaders.add(ComponentVal.record(hf));
+                }
+            });
+            final Map<String, ComponentVal> respFields = new LinkedHashMap<>();
+            respFields.put("status", ComponentVal.u16(status));
+            respFields.put("headers", ComponentVal.list(respHeaders));
+            respFields.put("body", ComponentVal.string(response.body()));
+            return ComponentVal.ok(ComponentVal.record(respFields));
+        } catch (java.io.IOException ioe) {
+            return ComponentVal.err(httpErrorV1("network",
+                ioe.getMessage() == null ? ioe.toString() : ioe.getMessage()));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return ComponentVal.err(httpErrorV1("network", "interrupted"));
+        }
+    }
+
+    private static ComponentVal httpErrorV1(final String armName, final String message) {
+        return ComponentVal.variant(armName, ComponentVal.string(message));
+    }
+
+    // ---- tegmentum:webfunction/wasm-callbacks@0.1.0 -------------------------
+
+    /**
+     * Base-substrate {@code tegmentum:webfunction/wasm-callbacks@0.1.0#invoke-wasm:
+     *  func(component-uri: string, function-name: string, args: list<term>)
+     *   -> result<term, wasm-call-error>}.
+     *
+     * <p>MVP: returns {@code wasm-call-error::not-permitted} with a descriptive
+     * message. Full sub-component composition on the JVM host is separate
+     * future work; the WIT surface is wired so guests importing this
+     * interface can link. Distinct from the legacy {@link #invokeWasm}
+     * which speaks the {@code stardog:webfunction/host} shape.
+     */
+    public static WitHostFunction invokeWasmV1() {
+        return args -> new Object[] { ComponentVal.err(wasmCallErrorV1("not-permitted",
+            "invoke-wasm: not implemented on JVM host (MVP stub — full sub-component "
+            + "dispatch is future work)")) };
+    }
+
+    /**
+     * Base-substrate {@code tegmentum:webfunction/wasm-callbacks@0.1.0#invoke-wasm-service:
+     *  func(url: string, args: list<term>) -> result<list<binding>, wasm-call-error>}.
+     *
+     * <p>Property-function-shape counterpart to {@link #invokeWasmV1}. MVP is
+     * a {@code not-permitted} stub for the same reason.
+     */
+    public static WitHostFunction invokeWasmService() {
+        return args -> new Object[] { ComponentVal.err(wasmCallErrorV1("not-permitted",
+            "invoke-wasm-service: not implemented on JVM host (MVP stub — full "
+            + "sub-component dispatch is future work)")) };
+    }
+
+    private static ComponentVal wasmCallErrorV1(final String armName, final String message) {
+        return ComponentVal.variant(armName, ComponentVal.string(message));
+    }
+
     /**
      * Encode a Jena {@link Node} as the base {@code tegmentum:webfunction/types.term}
      * variant (4 arms: named-node / blank-node / literal / triple). Distinct
