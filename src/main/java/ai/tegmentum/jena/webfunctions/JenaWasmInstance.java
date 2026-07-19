@@ -105,90 +105,13 @@ public final class JenaWasmInstance implements Closeable {
         final Component component = componentFor(wasmUrl);
         final DefaultLinkingContext.Builder linker = DefaultLinkingContext.builder();
         if (WebFunctionConfig.callbackEnabled()) {
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.0#execute-query",
-                HostCallbacks.executeQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.0#callback-depth",
-                HostCallbacks.callbackDepth());
-            // v0.3.1 additive host imports — register alongside v0.3.0
-            // so both worlds' components link cleanly.
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.1#execute-query",
-                HostCallbacks.executeQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.1#callback-depth",
-                HostCallbacks.callbackDepth());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.1#execute-update",
-                HostCallbacks.executeUpdate());
-            // v0.3.2 additive imports — prepared queries.
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.2#execute-query",
-                HostCallbacks.executeQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.2#callback-depth",
-                HostCallbacks.callbackDepth());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.2#execute-update",
-                HostCallbacks.executeUpdate());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.2#prepare-query",
-                HostCallbacks.prepareQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.2#run-prepared",
-                HostCallbacks.runPrepared());
-            // v0.3.3 additive imports.
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.3#execute-query",
-                HostCallbacks.executeQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.3#callback-depth",
-                HostCallbacks.callbackDepth());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.3#execute-update",
-                HostCallbacks.executeUpdate());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.3#prepare-query",
-                HostCallbacks.prepareQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.3#run-prepared",
-                HostCallbacks.runPrepared());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.3.3#follow-predicate",
-                HostCallbacks.followPredicate());
-            // v0.4.0 additive imports — invoke-wasm unlocks portable
-            // higher-order combinators (wf_apply.wasm, wf_map.wasm) that
-            // build on top of wf:call. The other six imports are identical
-            // to v0.3.3 and re-registered against the v0.4.0 interface
-            // instance name so guests targeting v0.4 link cleanly.
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#execute-query",
-                HostCallbacks.executeQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#callback-depth",
-                HostCallbacks.callbackDepth());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#execute-update",
-                HostCallbacks.executeUpdate());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#prepare-query",
-                HostCallbacks.prepareQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#run-prepared",
-                HostCallbacks.runPrepared());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#follow-predicate",
-                HostCallbacks.followPredicate());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.4.0#invoke-wasm",
-                HostCallbacks.invokeWasm());
-            // v0.5.0 additive imports — sink-open / sink-execute /
-            // sink-close for out-of-graph destinations (SQLite in v0.5), plus
-            // a signature-changed execute-update that drops the bindings arg.
-            // The other six imports are identical to v0.4.0 and re-registered
-            // under the @0.5.0 instance name so guests targeting v0.5 link
-            // cleanly.
+            // stardog:webfunction/host@0.5.0 — the only legacy version
+            // still carrying consumers (six sink-reading crates). All of
+            // @0.3.x, @0.4.0 and @0.6.0 were retired as dead code (zero
+            // consumers on the shape); see
+            // webfunction-wit/hostcallbacks-legacy-retirement.md for the
+            // inventory. @0.5.0 stays until the sink-read migration lands
+            // (parallel M1 wave) — Phase 2 will retire it after.
             linker.addWitHostFunction(
                 "stardog:webfunction/host@0.5.0#execute-query",
                 HostCallbacks.executeQuery());
@@ -219,54 +142,11 @@ public final class JenaWasmInstance implements Closeable {
             linker.addWitHostFunction(
                 "stardog:webfunction/host@0.5.0#sink-close",
                 HostCallbacks.sinkClose());
-            // v0.6.0 additive imports — execute-query-with-bindings unlocks
-            // wf_pipeline v3's typed binding-set propagation: a step's row
-            // grid is handed to the next SPARQL step as a substrate-native
-            // VALUES splice, not stringified into VALUES text. Additive
-            // registration: guests targeting v0.3.x .. v0.5.x continue to
-            // link against their own interface instance above.
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#execute-query",
-                HostCallbacks.executeQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#execute-query-with-bindings",
-                HostCallbacks.executeQueryWithBindings());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#callback-depth",
-                HostCallbacks.callbackDepth());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#execute-update",
-                HostCallbacks.executeUpdateV05());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#prepare-query",
-                HostCallbacks.prepareQuery());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#run-prepared",
-                HostCallbacks.runPrepared());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#follow-predicate",
-                HostCallbacks.followPredicate());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#invoke-wasm",
-                HostCallbacks.invokeWasm());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#sink-open",
-                HostCallbacks.sinkOpen());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#sink-execute",
-                HostCallbacks.sinkExecute());
-            linker.addWitHostFunction(
-                "stardog:webfunction/host@0.6.0#sink-close",
-                HostCallbacks.sinkClose());
             // tegmentum:webfunction/graph-callbacks@0.1.0 — base-substrate
             // graph callback surface for guests targeting `world
-            // extension-with-host-callbacks`. Registered alongside the
-            // legacy stardog:webfunction/host@0.3.x-0.6.0 imports so both
-            // pre-migration guests (bare stardog imports) and migrated
-            // guests (tegmentum:webfunction graph-callbacks) link cleanly
-            // from the same JenaWasmInstance construction. Signatures
-            // differ from the legacy shape: execute-query takes one string
-            // (no bindings, no max-rows) and returns `result<query-result,
+            // extension-with-host-callbacks`. Signatures differ from the
+            // legacy shape: execute-query takes one string (no bindings,
+            // no max-rows) and returns `result<query-result,
             // graph-call-error>`; execute-update takes one string and
             // returns `result<_, graph-call-error>`. MVP adapter wraps
             // the same executor CallbackContext already exposes for the
