@@ -9,7 +9,6 @@ import org.apache.jena.query.ResultSet;
 import org.apache.jena.rdf.model.Model;
 import org.apache.jena.rdf.model.ModelFactory;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import java.io.File;
@@ -31,24 +30,6 @@ public class TestWfCallAgg {
         WebFunctionInit.register();
     }
 
-    // Pre-existing dispatch bug surfaced by the cross-plugin fixture
-    // migration: JenaWasmInstance.aggregateStep gates new-shape vs
-    // old-shape aggregate dispatch on BridgingSparqlExtensionDispatch.
-    // aggregateIsNewShape(), which in turn calls
-    // ComponentInstance.hasFunction("tegmentum:webfunction/aggregate@
-    // 0.1.0#new-aggregate"). The wasmtime4j-provider hasFunction probe
-    // does not see interface-qualified exports, so aggregateIsNewShape
-    // returns false, and the dispatch falls through to the flat
-    // aggregate-step export the migrated example-sum-aggregate does
-    // not provide. Filter-side dispatch already works around this via
-    // instance.exportsInterface(…); an equivalent workaround is needed
-    // for aggregate before this test can be re-enabled.
-    //
-    // The pre-migration wasm carried both shapes (flat aggregate-step
-    // AND resource aggregate-state), so this dispatch mismatch was
-    // masked. Once webfunctions/example-sum-aggregate drops the flat
-    // legacy export the test surfaces the underlying bug.
-    @Ignore("plugin dispatch bug: aggregateIsNewShape probe misses interface exports; new-shape example-sum-aggregate provides no flat aggregate-step fallback")
     @Test
     public void sumAggregatesRowValues() {
         final File wasm = new File(SUM_WASM);
