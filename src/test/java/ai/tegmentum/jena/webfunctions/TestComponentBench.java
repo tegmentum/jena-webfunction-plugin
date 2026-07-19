@@ -19,9 +19,7 @@ import static org.junit.Assume.assumeTrue;
 public class TestComponentBench {
 
     private static final String TO_UPPER_WASM =
-            System.getProperty("wf.toUpper.wasm",
-                    System.getProperty("user.home")
-                            + "/git/stardog-webfunction-plugin/src/test/rust/target/wasm32-wasip1/release/to_upper_component.wasm");
+            WasmFixtures.exampleUppercaseWasm();
 
     private static final int WARMUP = 500;
     private static final int MEASURED = 5_000;

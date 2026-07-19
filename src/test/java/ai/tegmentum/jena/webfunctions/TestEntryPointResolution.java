@@ -34,9 +34,7 @@ import static org.junit.Assume.assumeTrue;
 public class TestEntryPointResolution {
 
     private static final String TO_UPPER_WASM =
-            System.getProperty("wf.toUpper.wasm",
-                    System.getProperty("user.home")
-                            + "/git/stardog-webfunction-plugin/src/test/rust/target/wasm32-wasip1/release/to_upper_component.wasm");
+            WasmFixtures.exampleUppercaseWasm();
 
     private static final String WF_FULLTEXT_WASM =
             System.getProperty("wf.fulltext.wasm",

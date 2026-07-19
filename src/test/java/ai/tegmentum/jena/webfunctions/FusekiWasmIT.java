@@ -32,9 +32,7 @@ public class FusekiWasmIT {
 
     private static final String PLUGIN_JAR = System.getProperty("wf.plugin.jar",
             "target/tegmentum-jena-webfunction-0.1.0-SNAPSHOT.jar");
-    private static final String WASM_PATH = System.getProperty("wf.toUpper.wasm",
-            System.getProperty("user.home")
-                    + "/git/stardog-webfunction-plugin/src/test/rust/target/wasm32-wasip1/release/to_upper_component.wasm");
+    private static final String WASM_PATH = WasmFixtures.exampleUppercaseWasm();
 
     private static FusekiContainer CONTAINER;
     private static String WASM_URL;
